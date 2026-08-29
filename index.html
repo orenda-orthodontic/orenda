@@ -323,6 +323,77 @@
 const SUPABASE_URL = 'https://qlojglhddhnslvloqtzz.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_cORmYg4chO3LBoukS9Nfiw_9KvNcAy8';
 const SUPABASE_REST = SUPABASE_URL + '/rest/v1/kv_store';
+const SUPABASE_REST_LOG = SUPABASE_URL + '/rest/v1/activity_log';
+
+function patientNameForLog(){
+  const p = state.patients.find(x=>x.id === state.currentPatientId);
+  return p ? p.name : (state.currentPatientId || 'مريض غير معروف');
+}
+
+// records a "who did what" entry — best-effort, never blocks or breaks the calling action if it fails
+async function logActivity(action, description){  try{
+    await ensureFreshSession();
+    await fetch(SUPABASE_REST_LOG, {
+      method: 'POST',
+      headers: supabaseHeaders(),
+      body: JSON.stringify([{
+        actor_email: (authSession && authSession.email) || null,
+        action,
+        description,
+        clinic_id: state.currentClinicId || null,
+        patient_id: state.currentPatientId || null
+      }])
+    });
+  }catch(e){
+    console.error('logActivity failed', e);
+  }
+}
+
+async function openActivityLogModal(){
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:640px;">
+      <h3>سجل العمليات</h3>
+      <div id="activityLogBody" class="placeholder" style="padding:16px;">جارِ التحميل...</div>
+      <div class="modal-actions">
+        <button class="secondary" id="closeActivityLogBtn">إغلاق</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  document.getElementById('closeActivityLogBtn').onclick = () => bg.remove();
+  bg.onclick = (e) => { if(e.target === bg) bg.remove(); };
+  try{
+    await ensureFreshSession();
+    const res = await fetch(SUPABASE_REST_LOG + '?select=*&order=created_at.desc&limit=100', { headers: supabaseHeaders() });
+    if(!res.ok) throw new Error('log fetch failed: ' + res.status);
+    const rows = await res.json();
+    const body = document.getElementById('activityLogBody');
+    if(!rows.length){
+      body.textContent = 'مفيش عمليات مسجّلة لسه';
+    } else {
+      body.innerHTML = `
+        <table class="diag-table">
+          <thead><tr><th>الوقت</th><th>مين</th><th>العملية</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td style="white-space:nowrap;color:var(--muted);font-size:12px;">${new Date(r.created_at).toLocaleString('ar-EG')}</td>
+                <td style="white-space:nowrap;">${escapeHtml(r.actor_email || '-')}</td>
+                <td>${escapeHtml(r.description || r.action || '')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+  }catch(e){
+    console.error('activity log load failed', e);
+    const body = document.getElementById('activityLogBody');
+    if(body) body.textContent = 'تعذر تحميل السجل — تأكد إن جدول activity_log اتعمل في Supabase';
+  }
+}
 
 function supabaseHeaders(extra){
   return Object.assign({
@@ -569,6 +640,7 @@ let state = {
   clinicSummaryLoading: false,
   inventory: [], // items of current clinic
   inventoryCategories: [],
+  photoUrlCache: {}, // path -> {url, expiresAt} — temporary signed URLs for the (now private) photos bucket
   doctorName: 'MAHMOUD NASSAR',
   monthlyKeywordsOpen: false
 };
@@ -902,21 +974,43 @@ function migrateExtraOralFrontalFields(sections){
 }
 
 // ============ RENDER ROOT ============
+function renderFatalErrorScreen(err){
+  console.error('fatal render/boot error', err);
+  const app = document.getElementById('app');
+  if(!app) return;
+  app.innerHTML = `
+    <div class="empty-state" style="padding:40px 16px;">
+      <div style="font-size:16px;font-weight:700;margin-bottom:8px;">تعذر تحميل النظام</div>
+      <div style="color:var(--muted);margin-bottom:18px;">حصلت مشكلة أثناء الاتصال أو تحميل البيانات. تأكد إن النت شغال وحاول تاني.</div>
+      <div class="row" style="justify-content:center;gap:10px;">
+        <button id="fatalRetryBtn">حاول تاني</button>
+        <button class="secondary" id="fatalLoginBtn">ارجع لشاشة الدخول</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('fatalRetryBtn').onclick = () => location.reload();
+  document.getElementById('fatalLoginBtn').onclick = () => supabaseLogout();
+}
+
 async function render(){
   const app = document.getElementById('app');
-  if(state.view === 'clinics'){
-    await loadInventory();
-    app.innerHTML = renderClinicsView();
-    attachClinicsHandlers();
-  } else if(state.view === 'patients'){
-    app.innerHTML = renderPatientsView();
-    attachPatientsHandlers();
-  } else if(state.view === 'patient'){
-    app.innerHTML = await renderPatientView();
-    attachPatientHandlers();
-  } else if(state.view === 'inventory'){
-    app.innerHTML = renderInventoryView();
-    attachInventoryHandlers();
+  try{
+    if(state.view === 'clinics'){
+      await loadInventory();
+      app.innerHTML = renderClinicsView();
+      attachClinicsHandlers();
+    } else if(state.view === 'patients'){
+      app.innerHTML = renderPatientsView();
+      attachPatientsHandlers();
+    } else if(state.view === 'patient'){
+      app.innerHTML = await renderPatientView();
+      attachPatientHandlers();
+    } else if(state.view === 'inventory'){
+      app.innerHTML = renderInventoryView();
+      attachInventoryHandlers();
+    }
+  }catch(err){
+    renderFatalErrorScreen(err);
   }
 }
 
@@ -1112,6 +1206,48 @@ async function markClinicPhotographed(clinicId, date){
 }
 
 // ============ PATIENTS VIEW ============
+function renderPatientListHtml(){
+  const term = state.searchTerm.trim().toLowerCase();
+  let list = state.patients.filter(p => !term || p.name.toLowerCase().includes(term) || (p.number||'').includes(term));
+  list = [...list].sort((a,b)=> a.name.localeCompare(b.name, 'ar'));
+
+  if(!list.length){
+    return `<div class="empty-state">${state.patients.length ? 'مفيش نتائج للبحث ده' : 'لسه مفيش مرضى في العيادة دي'}</div>`;
+  }
+  let lastLetter = null;
+  let html = '<ul class="patient-list">';
+  list.forEach(p=>{
+    const letter = p.name.trim()[0];
+    if(letter !== lastLetter){
+      html += `<li class="letter-heading">${letter}</li>`;
+      lastLetter = letter;
+    }
+    html += `
+      <li class="patient-item" data-id="${p.id}">
+        <div>
+          <div class="pname">${escapeHtml(p.name)}</div>
+          <div class="pnum">رقم: ${escapeHtml(p.number || '-')}</div>
+        </div>
+        <div style="color:var(--muted);font-size:18px;">‹</div>
+      </li>
+    `;
+  });
+  html += '</ul>';
+  return html;
+}
+
+function attachPatientListHandlers(){
+  document.querySelectorAll('.patient-item').forEach(el=>{
+    el.onclick = async () => {
+      state.currentPatientId = el.dataset.id;
+      state.view = 'patient';
+      state.activeTab = 'overview';
+      await loadInventory();
+      render();
+    };
+  });
+}
+
 function renderPatientsView(){
   const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
   const commissionPct = clinic ? (parseFloat(clinic.commission) || 70) : 70;
@@ -1128,34 +1264,6 @@ function renderPatientsView(){
       <div class="bracket-stat"><div class="num">${summaryClinicShare.toLocaleString()}</div><div class="lbl">نصيب العيادة</div></div>
     </div>
   `;
-  const term = state.searchTerm.trim().toLowerCase();
-  let list = state.patients.filter(p => !term || p.name.toLowerCase().includes(term) || (p.number||'').includes(term));
-  list = [...list].sort((a,b)=> a.name.localeCompare(b.name, 'ar'));
-
-  let html = '';
-  if(!list.length){
-    html = `<div class="empty-state">${state.patients.length ? 'مفيش نتائج للبحث ده' : 'لسه مفيش مرضى في العيادة دي'}</div>`;
-  } else {
-    let lastLetter = null;
-    html = '<ul class="patient-list">';
-    list.forEach(p=>{
-      const letter = p.name.trim()[0];
-      if(letter !== lastLetter){
-        html += `<li class="letter-heading">${letter}</li>`;
-        lastLetter = letter;
-      }
-      html += `
-        <li class="patient-item" data-id="${p.id}">
-          <div>
-            <div class="pname">${escapeHtml(p.name)}</div>
-            <div class="pnum">رقم: ${escapeHtml(p.number || '-')}</div>
-          </div>
-          <div style="color:var(--muted);font-size:18px;">‹</div>
-        </li>
-      `;
-    });
-    html += '</ul>';
-  }
 
   return `
     <div class="breadcrumb">
@@ -1176,7 +1284,7 @@ function renderPatientsView(){
     </div>
     <div class="card">
       <input type="text" id="searchPatient" placeholder="بحث بالاسم أو الرقم..." value="${escapeHtml(state.searchTerm)}" style="width:100%;margin-bottom:12px;">
-      ${html}
+      <div id="patientListContainer">${renderPatientListHtml()}</div>
     </div>
   `;
 }
@@ -1199,21 +1307,13 @@ function attachPatientsHandlers(){
   const search = document.getElementById('searchPatient');
   search.oninput = () => {
     state.searchTerm = search.value;
-    render();
-    setTimeout(()=>{
-      const s = document.getElementById('searchPatient');
-      if(s){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
-    },0);
+    const container = document.getElementById('patientListContainer');
+    if(container){
+      container.innerHTML = renderPatientListHtml();
+      attachPatientListHandlers();
+    }
   };
-  document.querySelectorAll('.patient-item').forEach(el=>{
-    el.onclick = async () => {
-      state.currentPatientId = el.dataset.id;
-      state.view = 'patient';
-      state.activeTab = 'overview';
-      await loadInventory();
-      render();
-    };
-  });
+  attachPatientListHandlers();
 }
 
 function openPatientModal(){
@@ -1248,6 +1348,7 @@ function openPatientModal(){
     state.patients.push({ id, name, number: String(nextNum) });
     await setData('patients:' + state.currentClinicId, state.patients);
     await setData('clinics', state.clinics);
+    await logActivity('add_patient', `أضاف مريض جديد: ${name} (رقم ${nextNum})`);
     bg.remove();
     toast('اتضاف المريض برقم ' + nextNum);
     render();
@@ -1305,19 +1406,10 @@ function isLowStockItem(item){
   return qty <= th;
 }
 
-function renderInventoryView(){
-  const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+function renderInventoryCategoriesHtml(){
   const term = (state.inventorySearch||'').trim().toLowerCase();
-
-  const lowItems = state.inventory.filter(i => isLowStockItem(i));
-  const lowHtml = lowItems.length ? `
-    <div class="bracket-alert stock-alert-blink">
-      ⚠️ خامات وصلت لحد النفاد: ${lowItems.map(i=>escapeHtml(i.name) + ' (' + (parseFloat(i.qty)||0) + ')').join('، ')}
-    </div>
-  ` : '';
-
   const PROTECTED_CATEGORY_IDS = new Set([BRACKET_CATEGORY_ID]);
-  const categoriesHtml = state.inventoryCategories.map(cat=>{
+  return state.inventoryCategories.map(cat=>{
     const isProtected = PROTECTED_CATEGORY_IDS.has(cat.id);
     const mainCatActionsHtml = isProtected ? '' : `
       <button class="secondary small" data-edit-main-cat="${cat.id}">تعديل</button>
@@ -1391,6 +1483,17 @@ function renderInventoryView(){
       </div>
     `;
   }).join('');
+}
+
+function renderInventoryView(){
+  const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+
+  const lowItems = state.inventory.filter(i => isLowStockItem(i));
+  const lowHtml = lowItems.length ? `
+    <div class="bracket-alert stock-alert-blink">
+      ⚠️ خامات وصلت لحد النفاد: ${lowItems.map(i=>escapeHtml(i.name) + ' (' + (parseFloat(i.qty)||0) + ')').join('، ')}
+    </div>
+  ` : '';
 
   return `
     <div class="breadcrumb">
@@ -1405,7 +1508,7 @@ function renderInventoryView(){
     <div class="card">
       <input type="text" id="searchInventory" placeholder="بحث عن صنف..." value="${escapeHtml(state.inventorySearch||'')}" style="width:100%;">
     </div>
-    ${categoriesHtml}
+    <div id="inventoryCategoriesContainer">${renderInventoryCategoriesHtml()}</div>
   `;
 }
 
@@ -1480,8 +1583,7 @@ async function quickDeductRevealItem(itemId){
 }
 
 let revealClickTimer = null;
-function attachInventoryHandlers(){
-  document.getElementById('crumbClinics3').onclick = () => { state.view = 'clinics'; render(); };
+function attachInventoryCategoryHandlers(){
   document.querySelectorAll('[data-reveal-item]').forEach(el=>{
     // single click opens the edit-qty modal; double click deducts one unit immediately.
     // click is delayed briefly so a fast second click (dblclick) can cancel it.
@@ -1496,18 +1598,6 @@ function attachInventoryHandlers(){
       quickDeductRevealItem(el.dataset.revealItem);
     };
   });
-  document.getElementById('addMainCategoryBtn').onclick = () => openAddMainCategoryModal();
-  const search = document.getElementById('searchInventory');
-  if(search){
-    search.oninput = () => {
-      state.inventorySearch = search.value;
-      render();
-      setTimeout(()=>{
-        const s = document.getElementById('searchInventory');
-        if(s){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
-      },0);
-    };
-  }
   document.querySelectorAll('[data-add-item]').forEach(el=>{
     el.onclick = () => openAddInventoryItemModal(el.dataset.addItem);
   });
@@ -1532,6 +1622,23 @@ function attachInventoryHandlers(){
   document.querySelectorAll('[data-del-main-cat]').forEach(el=>{
     el.onclick = () => deleteMainCategory(el.dataset.delMainCat);
   });
+}
+
+function attachInventoryHandlers(){
+  document.getElementById('crumbClinics3').onclick = () => { state.view = 'clinics'; render(); };
+  document.getElementById('addMainCategoryBtn').onclick = () => openAddMainCategoryModal();
+  const search = document.getElementById('searchInventory');
+  if(search){
+    search.oninput = () => {
+      state.inventorySearch = search.value;
+      const container = document.getElementById('inventoryCategoriesContainer');
+      if(container){
+        container.innerHTML = renderInventoryCategoriesHtml();
+        attachInventoryCategoryHandlers();
+      }
+    };
+  }
+  attachInventoryCategoryHandlers();
 }
 
 function openEditMainCategoryModal(catId){
@@ -1732,6 +1839,7 @@ function openRestockModal(itemId){
     const add = parseFloat(document.getElementById('restockQty').value) || 0;
     item.qty = (parseFloat(item.qty)||0) + add;
     await saveInventory();
+    await logActivity('restock_item', `ورّد ${add} من "${item.name}" (الكمية بقت ${item.qty})`);
     bg.remove();
     toast('اتحدثت الكمية');
     render();
@@ -1764,6 +1872,7 @@ function openBulkRestockModal(categoryId){
     if(add <= 0){ toast('اكتب كمية صحيحة'); return; }
     items.forEach(i=>{ i.qty = (parseFloat(i.qty)||0) + add; });
     await saveInventory();
+    await logActivity('bulk_restock', `توريد جماعي: أضاف ${add} لكل صنف في "${cat.label}" (${items.length} صنف)`);
     bg.remove();
     toast(`اتضافت ${add} لكل صنف من "${cat.label}" (${items.length} صنف)`);
     render();
@@ -1776,6 +1885,7 @@ async function adjustInventoryQty(itemId, delta){
   if(!item) return;
   item.qty = Math.max(0, (parseFloat(item.qty)||0) + delta);
   await saveInventory();
+  await logActivity('adjust_inventory', `${delta < 0 ? 'استخدم' : 'أضاف'} ${Math.abs(delta)} من "${item.name}" (الكمية بقت ${item.qty})`);
   render();
   if(isLowStockItem(item)){
     toast('⚠️ ' + item.name + ' وصل لحد الإنذار (' + item.qty + ')');
@@ -1784,8 +1894,10 @@ async function adjustInventoryQty(itemId, delta){
 
 async function deleteInventoryItem(itemId){
   if(!confirm('حذف الصنف ده؟')) return;
+  const item = state.inventory.find(i=>i.id === itemId);
   state.inventory = state.inventory.filter(i=>i.id !== itemId);
   await saveInventory();
+  await logActivity('delete_inventory_item', `حذف صنف من المخزون: ${item ? item.name : itemId}`);
   render();
 }
 
@@ -1823,6 +1935,7 @@ async function renderPatientView(){
   } else if(state.activeTab === 'monthly'){
     bodyHtml = renderMonthlyTab();
   } else if(state.activeTab === 'photos'){
+    await refreshPhotoUrlCache(collectPhotoPaths(ensurePhotos(file)));
     bodyHtml = renderPhotosTab();
   } else if(state.activeTab === 'brackets'){
     bodyHtml = renderBracketsTab();
@@ -2091,7 +2204,55 @@ async function uploadPhotoToStorage(blob, path){
     const t = await res.text().catch(()=> '');
     throw new Error('Storage upload failed: ' + res.status + ' ' + t);
   }
+  // bucket is private now — this "public" URL only works once we generate a signed URL for it,
+  // which happens lazily via refreshPhotoUrlCache() whenever the Photos tab is rendered
   return `${SUPABASE_URL}/storage/v1/object/public/${PHOTO_STORAGE_BUCKET}/${path}`;
+}
+
+// signs a batch of storage paths at once (one request instead of one per photo) and caches
+// the temporary signed URLs in state.photoUrlCache, keyed by path; signed URLs expire after
+// PHOTO_SIGNED_URL_TTL seconds so a copied/leaked link stops working on its own
+const PHOTO_SIGNED_URL_TTL = 3600; // 1 hour
+async function refreshPhotoUrlCache(paths){
+  const now = Date.now();
+  const needed = [...new Set((paths || []).filter(Boolean))]
+    .filter(p => !state.photoUrlCache[p] || state.photoUrlCache[p].expiresAt < now);
+  if(!needed.length) return;
+  try{
+    await ensureFreshSession();
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${PHOTO_STORAGE_BUCKET}`, {
+      method: 'POST',
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ expiresIn: PHOTO_SIGNED_URL_TTL, paths: needed })
+    });
+    if(!res.ok) throw new Error('Storage sign batch failed: ' + res.status);
+    const rows = await res.json();
+    (rows || []).forEach(r=>{
+      if(r && r.signedURL && !r.error){
+        const full = r.signedURL.startsWith('http') ? r.signedURL : `${SUPABASE_URL}/storage/v1${r.signedURL}`;
+        state.photoUrlCache[r.path] = { url: full, expiresAt: now + (PHOTO_SIGNED_URL_TTL - 60) * 1000 };
+      }
+    });
+  }catch(e){
+    console.error('refreshPhotoUrlCache failed', e);
+  }
+}
+
+// reads the cached signed URL for a stored photo object; falls back to the old .url field
+// (harmless if the bucket is still public, dead if it's private — either way not a crash)
+function resolvePhotoUrl(photoObj){
+  if(!photoObj) return '';
+  const cached = photoObj.path && state.photoUrlCache[photoObj.path];
+  return (cached && cached.url) || photoObj.url || '';
+}
+
+function collectPhotoPaths(photos){
+  const paths = [];
+  const grab = (obj) => { if(obj) Object.values(obj).forEach(s => { if(s && s.path) paths.push(s.path); }); };
+  if(photos.before){ grab(photos.before.extraoral); grab(photos.before.intraoral); grab(photos.before.records); }
+  if(photos.after){ grab(photos.after.extraoral); grab(photos.after.intraoral); grab(photos.after.records); }
+  (photos.during || []).forEach(v => { grab(v.extraoral); grab(v.intraoral); });
+  return paths;
 }
 
 async function deletePhotoFromStorage(path){
@@ -2222,6 +2383,7 @@ async function deletePhotoSlot(section, visitId, category, slotId){
   delete slotsObj[slotId];
   await savePatientFile(state.currentPatientId, stripHelperFields(pFile));
   deletePhotoFromStorage(old.path);
+  await logActivity('delete_photo', `حذف صورة (${section}/${category}/${slotId}) لمريض ${patientNameForLog()}`);
   toast('اتمسحت الصورة');
   render();
 }
@@ -2262,7 +2424,7 @@ function photoSlotHtml(section, visitId, category, slot, slotsObj){
       <div class="photo-slot-label">${escapeHtml(slot.label)}</div>
       ${s ? `
         <div class="photo-slot-thumb-wrap" draggable="true" data-photo-drag-source="${dropId}">
-          <img src="${s.url}" class="photo-slot-thumb" data-lightbox="${s.url}">
+          <img src="${resolvePhotoUrl(s)}" class="photo-slot-thumb" data-lightbox="${resolvePhotoUrl(s)}">
           <button class="photo-slot-del" data-del-photo="${dropId}">×</button>
         </div>
       ` : `<div class="photo-slot-empty">📷<br>اسحب صورة هنا<br>أو دوس للاختيار</div>`}
@@ -2358,11 +2520,11 @@ function renderPhotosTab(){
       <div class="photo-compare-grid">
         <div class="photo-compare-col">
           <div class="photo-category-title">قبل</div>
-          ${beforePhoto ? `<img src="${beforePhoto.url}" class="photo-compare-img" data-lightbox="${beforePhoto.url}">` : `<div class="placeholder" style="padding:20px;">مفيش صورة</div>`}
+          ${beforePhoto ? `<img src="${resolvePhotoUrl(beforePhoto)}" class="photo-compare-img" data-lightbox="${resolvePhotoUrl(beforePhoto)}">` : `<div class="placeholder" style="padding:20px;">مفيش صورة</div>`}
         </div>
         <div class="photo-compare-col">
           <div class="photo-category-title">${rightLabel}</div>
-          ${rightPhoto ? `<img src="${rightPhoto.url}" class="photo-compare-img" data-lightbox="${rightPhoto.url}">` : `<div class="placeholder" style="padding:20px;">مفيش صورة</div>`}
+          ${rightPhoto ? `<img src="${resolvePhotoUrl(rightPhoto)}" class="photo-compare-img" data-lightbox="${resolvePhotoUrl(rightPhoto)}">` : `<div class="placeholder" style="padding:20px;">مفيش صورة</div>`}
         </div>
       </div>
     ` : ''}
@@ -3917,6 +4079,7 @@ function openEditPatientModal(){
     if(!confirm('متأكد إنك عايز تمسح المريض ده؟')) return;
     state.patients = state.patients.filter(p=>p.id !== patient.id);
     await setData('patients:' + state.currentClinicId, state.patients);
+    await logActivity('delete_patient', `حذف مريض: ${patient.name} (رقم ${patient.number||'-'})`);
     bg.remove();
     toast('اتمسح المريض');
     state.view = 'patients';
@@ -4088,6 +4251,7 @@ function openAddPaymentModal(){
     if(!file.payments) file.payments = [];
     file.payments.push({ id: uid(), amount, date, note });
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
+    await logActivity('add_payment', `أضاف دفعة ${amount} جنيه لمريض ${patientNameForLog()}`);
     bg.remove();
     render();
   };
@@ -4123,6 +4287,7 @@ function openAddExtraModal(){
     if(!file.financeExtras) file.financeExtras = [];
     file.financeExtras.push({ id: uid(), amount, reason, date });
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
+    await logActivity('add_extra', `أضاف رسوم إضافية "${reason}" (${amount} جنيه) لمريض ${patientNameForLog()}`);
     bg.remove();
     render();
   };
@@ -4157,6 +4322,7 @@ function openEditPaymentModal(id){
     if(amount <= 0){ toast('اكتب مبلغ صحيح'); return; }
     p.amount = amount; p.date = date; p.note = note;
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
+    await logActivity('edit_payment', `عدّل دفعة (${amount} جنيه) لمريض ${patientNameForLog()}`);
     bg.remove();
     render();
   };
@@ -4201,8 +4367,10 @@ function openEditExtraModal(id){
 async function deletePayment(id){
   if(!confirm('حذف الدفعة دي؟')) return;
   const file = state.currentPatientFile;
+  const p = (file.payments||[]).find(x=>x.id===id);
   file.payments = (file.payments||[]).filter(p=>p.id !== id);
   await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  await logActivity('delete_payment', `حذف دفعة (${p ? p.amount : '?'} جنيه) من مريض ${patientNameForLog()}`);
   render();
 }
 
@@ -4295,15 +4463,19 @@ function renderLoginScreen(errorMsg){
 }
 
 async function boot(){
-  authSession = loadStoredSession();
-  const ok = authSession ? await ensureFreshSession() : false;
-  if(!ok){
-    renderLoginScreen();
-    return;
+  try{
+    authSession = loadStoredSession();
+    const ok = authSession ? await ensureFreshSession() : false;
+    if(!ok){
+      renderLoginScreen();
+      return;
+    }
+    await loadClinics();
+    render();
+    attachGlobalLogoutButton();
+  }catch(err){
+    renderFatalErrorScreen(err);
   }
-  await loadClinics();
-  render();
-  attachGlobalLogoutButton();
 }
 
 function attachGlobalLogoutButton(){
@@ -4315,6 +4487,14 @@ function attachGlobalLogoutButton(){
   btn.style.cssText = 'position:fixed;top:10px;left:10px;z-index:999;';
   btn.onclick = () => { if(confirm('تسجيل الخروج؟')) supabaseLogout(); };
   document.body.appendChild(btn);
+
+  const logBtn = document.createElement('button');
+  logBtn.id = 'globalActivityLogBtn';
+  logBtn.textContent = 'سجل العمليات';
+  logBtn.className = 'secondary small';
+  logBtn.style.cssText = 'position:fixed;top:10px;left:70px;z-index:999;';
+  logBtn.onclick = () => openActivityLogModal();
+  document.body.appendChild(logBtn);
 }
 
 boot();
