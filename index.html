@@ -236,6 +236,17 @@
   .low-stock-row{animation:lowRowBlink 1.4s ease-in-out infinite;}
   .photo-reminder{margin-top:8px;padding:6px 8px;border-radius:8px;background:#fff3e0;color:#b45309;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;}
   .photo-reminder .photo-mark-btn{font-size:11px;padding:3px 8px;}
+
+  /* ===== Patient contact / missed-follow-up badges ===== */
+  .appt-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:700;white-space:nowrap;}
+  .appt-badge.overdue{background:rgba(224,106,90,.16);color:var(--red);border:1px solid var(--red);}
+  .appt-badge.none{background:var(--panel2);color:var(--muted);border:1px solid var(--border);}
+  .pcontact{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;}
+  .pcontact .pmeta{color:var(--muted);font-size:12px;}
+  .wa-btn{background:var(--green);color:#fff;text-decoration:none;padding:5px 10px;border-radius:10px;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:4px;}
+  .wa-btn:hover{background:#237e58;}
+  .wa-btn.disabled{background:var(--panel2);color:var(--muted);pointer-events:none;border:1px solid var(--border);}
+  .wa-btn.small{padding:3px 8px;font-size:11.5px;}
   @keyframes lowRowBlink{
     0%,100%{background:rgba(224,106,90,.08);}
     50%{background:rgba(224,106,90,.28);}
@@ -563,7 +574,7 @@ async function exportBackup(){
 }
 
 async function importBackup(file){
-  if(!confirm('استيراد النسخة دي هيستبدل بيانات نفس المرضى/العيادات لو موجودين بنفس الأرقام. تكمل؟')) return;
+  if(!(await confirmModal('استيراد النسخة دي هيستبدل بيانات نفس المرضى/العيادات لو موجودين بنفس الأرقام. تكمل؟'))) return;
   try{
     const text = await file.text();
     const payload = JSON.parse(text);
@@ -594,7 +605,7 @@ async function importBackup(file){
     render();
 
     if(failed.length){
-      alert('تم استيراد معظم البيانات، لكن الأجزاء دي فشلت في الرفع حتى بعد إعادة المحاولة:\n' + failed.join('\n') + '\n\nتأكد إن النت شغال ومستقر وحاول تستورد نفس الملف تاني.');
+      await alertModal('تم استيراد معظم البيانات، لكن الأجزاء دي فشلت في الرفع حتى بعد إعادة المحاولة:\n' + failed.join('\n') + '\n\nتأكد إن النت شغال ومستقر وحاول تستورد نفس الملف تاني.');
     } else {
       toast('اتضافت النسخة الاحتياطية بالكامل');
     }
@@ -610,6 +621,95 @@ function toast(msg){
   t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 1800);
 }
+
+// ============ MODAL HELPERS (replace native confirm/prompt/alert) ============
+function confirmModal(message, opts={}){
+  const confirmLabel = opts.confirmLabel || 'تأكيد';
+  const cancelLabel = opts.cancelLabel || 'إلغاء';
+  const danger = !!opts.danger;
+  return new Promise(resolve=>{
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `
+      <div class="modal">
+        <h3>تأكيد</h3>
+        <p style="font-size:14px;line-height:1.7;white-space:pre-line;margin:0 0 16px;color:var(--text);">${escapeHtml(message)}</p>
+        <div class="modal-actions">
+          <button class="secondary" id="modalCancelBtn">${escapeHtml(cancelLabel)}</button>
+          <button class="${danger?'danger':''}" id="modalConfirmBtn">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(bg);
+    const cleanup = (result) => { bg.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+    document.getElementById('modalCancelBtn').onclick = () => cleanup(false);
+    document.getElementById('modalConfirmBtn').onclick = () => cleanup(true);
+    bg.onclick = (e) => { if(e.target === bg) cleanup(false); };
+    function onKey(e){ if(e.key==='Escape') cleanup(false); }
+    document.addEventListener('keydown', onKey);
+    setTimeout(()=>{ const b = document.getElementById('modalConfirmBtn'); if(b) b.focus(); }, 50);
+  });
+}
+
+function alertModal(message, opts={}){
+  const title = opts.title || 'تنبيه';
+  return new Promise(resolve=>{
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `
+      <div class="modal">
+        <h3>${escapeHtml(title)}</h3>
+        <p style="font-size:14px;line-height:1.7;white-space:pre-line;margin:0 0 16px;color:var(--text);">${escapeHtml(message)}</p>
+        <div class="modal-actions">
+          <button id="modalOkBtn">تمام</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(bg);
+    const cleanup = () => { bg.remove(); document.removeEventListener('keydown', onKey); resolve(); };
+    document.getElementById('modalOkBtn').onclick = cleanup;
+    bg.onclick = (e) => { if(e.target === bg) cleanup(); };
+    function onKey(e){ if(e.key==='Escape' || e.key==='Enter') cleanup(); }
+    document.addEventListener('keydown', onKey);
+    setTimeout(()=>{ const b = document.getElementById('modalOkBtn'); if(b) b.focus(); }, 50);
+  });
+}
+
+function promptModal(title, defaultValue, opts={}){
+  const placeholder = opts.placeholder || '';
+  const type = opts.type || 'text';
+  const label = opts.label || '';
+  return new Promise(resolve=>{
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `
+      <div class="modal">
+        <h3>${escapeHtml(title)}</h3>
+        <div class="field">
+          ${label ? `<label>${escapeHtml(label)}</label>` : ''}
+          <input type="${type}" id="modalPromptInput" value="${escapeHtml(defaultValue || '')}" placeholder="${escapeHtml(placeholder)}" style="width:100%;">
+        </div>
+        <div class="modal-actions">
+          <button class="secondary" id="modalPromptCancelBtn">إلغاء</button>
+          <button id="modalPromptOkBtn">حفظ</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(bg);
+    const input = document.getElementById('modalPromptInput');
+    const cleanup = (result) => { bg.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+    document.getElementById('modalPromptCancelBtn').onclick = () => cleanup(null);
+    document.getElementById('modalPromptOkBtn').onclick = () => { const v = input.value.trim(); cleanup(v ? v : null); };
+    bg.onclick = (e) => { if(e.target === bg) cleanup(null); };
+    function onKey(e){
+      if(e.key==='Escape') cleanup(null);
+      if(e.key==='Enter'){ e.preventDefault(); const v = input.value.trim(); cleanup(v ? v : null); }
+    }
+    document.addEventListener('keydown', onKey);
+    setTimeout(()=>{ input.focus(); if(type==='text') input.select(); }, 50);
+  });
+}
+
 
 function uid(){
   return Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -627,7 +727,7 @@ function buildWhatsappLink(raw){
 
 // ============ STATE ============
 let state = {
-  view: 'clinics', // 'clinics' | 'patients' | 'patient'
+  view: 'clinics', // 'clinics' | 'patients' | 'patient' | 'inventory'
   clinics: [],
   currentClinicId: null,
   patients: [], // patients of current clinic
@@ -638,6 +738,9 @@ let state = {
   clinicSummaryMonth: null,
   clinicSummaryTotal: 0,
   clinicSummaryLoading: false,
+  clinicMissedStatus: {}, // patientId -> consecutive missed months (computed)
+  clinicBracketTypes: {}, // patientId -> 'roth'/'mbt'/'' (computed)
+  patientSortMode: 'alpha', // 'alpha' | 'number'
   inventory: [], // items of current clinic
   inventoryCategories: [],
   photoUrlCache: {}, // path -> {url, expiresAt} — temporary signed URLs for the (now private) photos bucket
@@ -649,6 +752,46 @@ const PHOTO_REMINDER_MONTHS = 3;
 function currentMonthStr(){
   return new Date().toISOString().slice(0,7);
 }
+function todayStr(){
+  return new Date().toISOString().slice(0,10);
+}
+// days between today and a given YYYY-MM-DD date (negative = in the past)
+function daysUntil(dateStr){
+  if(!dateStr) return null;
+  const today = new Date(todayStr()+'T00:00:00');
+  const d = new Date(dateStr+'T00:00:00');
+  return Math.round((d - today) / 86400000);
+}
+function formatDateAr(dateStr){
+  if(!dateStr) return '-';
+  const parts = dateStr.split('-');
+  if(parts.length !== 3) return dateStr;
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+function buildPatientGreetingMessage(patient){
+  return `أهلاً ${patient.name} 👋`;
+}
+// counts consecutive fully-completed calendar months (going backward from last month,
+// not counting the current in-progress month) with no monthly-follow-up entry at all.
+function computeMissedMonths(monthlyLog){
+  const monthsWithEntries = new Set((monthlyLog||[]).map(e => (e.date||'').slice(0,7)));
+  let count = 0;
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1); // last fully-completed month
+  for(let i=0;i<24;i++){
+    const m = d.toISOString().slice(0,7);
+    if(monthsWithEntries.has(m)) break;
+    count++;
+    d.setMonth(d.getMonth()-1);
+  }
+  return count;
+}
+function buildWhatsappLinkWithText(raw, text){
+  const base = buildWhatsappLink(raw);
+  if(base === '#') return '#';
+  return base + '?text=' + encodeURIComponent(text || '');
+}
 function monthsSince(dateStr){
   if(!dateStr) return 0;
   const d = new Date(dateStr);
@@ -658,9 +801,21 @@ function monthsSince(dateStr){
   return Math.max(0, months);
 }
 
-async function loadClinicMonthlySummary(clinicId, month){
+async function loadClinicPatientAggregates(clinicId, month){
   state.clinicSummaryLoading = true;
   let total = 0;
+  const missedStatus = {};
+  const bracketTypes = {};
+  function applyFile(patientId, file){
+    const payments = (file && file.payments) || [];
+    payments.forEach(pay=>{
+      if((pay.date||'').slice(0,7) === month){
+        total += parseFloat(pay.amount) || 0;
+      }
+    });
+    missedStatus[patientId] = computeMissedMonths(file && file.monthlyLog);
+    bracketTypes[patientId] = (file && file.bracketSystem) || '';
+  }
   try{
     if(state.patients.length){
       const keys = state.patients.map(p => '"patientfile:' + p.id + '"');
@@ -671,30 +826,23 @@ async function loadClinicMonthlySummary(clinicId, month){
       );
       if(!res.ok) throw new Error('Supabase batch get failed: ' + res.status);
       const rows = await res.json();
-      rows.forEach(row=>{
-        const file = row.value;
-        const payments = (file && file.payments) || [];
-        payments.forEach(pay=>{
-          if((pay.date||'').slice(0,7) === month){
-            total += parseFloat(pay.amount) || 0;
-          }
-        });
+      const byKey = {};
+      rows.forEach(row=>{ byKey[row.key] = row.value; });
+      state.patients.forEach(p=>{
+        applyFile(p.id, byKey['patientfile:' + p.id]);
       });
     }
   }catch(e){
-    console.error('clinic monthly summary batch fetch failed', e);
-    // fallback: old slower per-patient method, so the number still loads even if batch fails
+    console.error('clinic patient aggregates batch fetch failed', e);
+    // fallback: old slower per-patient method, so the numbers still load even if batch fails
     for(const p of state.patients){
-      const file = await getData('patientfile:' + p.id, { payments: [] });
-      const payments = (file && file.payments) || [];
-      payments.forEach(pay=>{
-        if((pay.date||'').slice(0,7) === month){
-          total += parseFloat(pay.amount) || 0;
-        }
-      });
+      const file = await getData('patientfile:' + p.id, { payments: [], monthlyLog: [] });
+      applyFile(p.id, file);
     }
   }
   state.clinicSummaryTotal = total;
+  state.clinicMissedStatus = missedStatus;
+  state.clinicBracketTypes = bracketTypes;
   state.clinicSummaryLoading = false;
 }
 
@@ -1099,7 +1247,7 @@ function attachClinicsHandlers(){
       if(!state.clinicSummaryMonth) state.clinicSummaryMonth = currentMonthStr();
       state.clinicSummaryLoading = true;
       render();
-      await loadClinicMonthlySummary(state.currentClinicId, state.clinicSummaryMonth);
+      await loadClinicPatientAggregates(state.currentClinicId, state.clinicSummaryMonth);
       render();
     };
   });
@@ -1209,7 +1357,12 @@ async function markClinicPhotographed(clinicId, date){
 function renderPatientListHtml(){
   const term = state.searchTerm.trim().toLowerCase();
   let list = state.patients.filter(p => !term || p.name.toLowerCase().includes(term) || (p.number||'').includes(term));
-  list = [...list].sort((a,b)=> a.name.localeCompare(b.name, 'ar'));
+
+  if(state.patientSortMode === 'number'){
+    list = [...list].sort((a,b)=> (parseInt(a.number,10)||0) - (parseInt(b.number,10)||0) || a.name.localeCompare(b.name,'ar'));
+  } else {
+    list = [...list].sort((a,b)=> a.name.localeCompare(b.name, 'ar'));
+  }
 
   if(!list.length){
     return `<div class="empty-state">${state.patients.length ? 'مفيش نتائج للبحث ده' : 'لسه مفيش مرضى في العيادة دي'}</div>`;
@@ -1217,16 +1370,25 @@ function renderPatientListHtml(){
   let lastLetter = null;
   let html = '<ul class="patient-list">';
   list.forEach(p=>{
-    const letter = p.name.trim()[0];
-    if(letter !== lastLetter){
-      html += `<li class="letter-heading">${letter}</li>`;
-      lastLetter = letter;
+    if(state.patientSortMode === 'alpha'){
+      const letter = p.name.trim()[0];
+      if(letter !== lastLetter){
+        html += `<li class="letter-heading">${letter}</li>`;
+        lastLetter = letter;
+      }
     }
+    const missed = state.clinicMissedStatus ? (state.clinicMissedStatus[p.id] || 0) : 0;
+    const bracketType = state.clinicBracketTypes ? (state.clinicBracketTypes[p.id] || '') : '';
     html += `
       <li class="patient-item" data-id="${p.id}">
         <div>
           <div class="pname">${escapeHtml(p.name)}</div>
           <div class="pnum">رقم: ${escapeHtml(p.number || '-')}</div>
+          <div class="pcontact">
+            ${p.phone ? `<a class="wa-btn small" data-wa-link href="${buildWhatsappLinkWithText(p.phone, buildPatientGreetingMessage(p))}" target="_blank" rel="noopener">💬 ${escapeHtml(p.phone)}</a>` : `<span class="pmeta">مفيش رقم موبايل</span>`}
+            <span class="pmeta">نوع البراكيت: ${bracketSystemLabel(bracketType)}</span>
+          </div>
+          ${missed >= 2 ? `<div style="margin-top:4px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${missed} شهر</span></div>` : ''}
         </div>
         <div style="color:var(--muted);font-size:18px;">‹</div>
       </li>
@@ -1245,6 +1407,9 @@ function attachPatientListHandlers(){
       await loadInventory();
       render();
     };
+  });
+  document.querySelectorAll('[data-wa-link]').forEach(el=>{
+    el.onclick = (e) => { e.stopPropagation(); };
   });
 }
 
@@ -1280,6 +1445,7 @@ function renderPatientsView(){
     </div>
     <div class="top-actions">
       <button id="addPatientBtn">+ إضافة مريض</button>
+      <button class="secondary${(state.clinicMissedStatus && Object.values(state.clinicMissedStatus).some(m=>m>=2)) ? ' btn-stock-alert' : ''}" id="toggleSortBtn">↕ ترتيب: ${state.patientSortMode==='number' ? 'بالأرقام' : 'أبجدي'}</button>
       <button class="secondary" id="editClinicBtn">تعديل نسبة العيادة</button>
     </div>
     <div class="card">
@@ -1295,13 +1461,17 @@ function attachPatientsHandlers(){
     render();
   };
   document.getElementById('addPatientBtn').onclick = () => openPatientModal();
+  document.getElementById('toggleSortBtn').onclick = () => {
+    state.patientSortMode = state.patientSortMode === 'number' ? 'alpha' : 'number';
+    render();
+  };
   document.getElementById('editClinicBtn').onclick = () => openEditClinicModal();
   const monthInput = document.getElementById('clinicSummaryMonth');
   if(monthInput) monthInput.onchange = async () => {
     state.clinicSummaryMonth = monthInput.value;
     state.clinicSummaryLoading = true;
     render();
-    await loadClinicMonthlySummary(state.currentClinicId, state.clinicSummaryMonth);
+    await loadClinicPatientAggregates(state.currentClinicId, state.clinicSummaryMonth);
     render();
   };
   const search = document.getElementById('searchPatient');
@@ -1327,6 +1497,10 @@ function openPatientModal(){
         <input type="text" id="newPatientName" placeholder="اسم المريض">
       </div>
       <div class="field">
+        <label>رقم الموبايل (لإرسال واتساب)</label>
+        <input type="text" id="newPatientPhone" placeholder="01xxxxxxxxx">
+      </div>
+      <div class="field">
         <label style="color:var(--muted)">الرقم هيتحدد تلقائي</label>
       </div>
       <div class="modal-actions">
@@ -1344,8 +1518,9 @@ function openPatientModal(){
     const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
     const nextNum = (clinic.nextPatientNumber || 1);
     clinic.nextPatientNumber = nextNum + 1;
+    const phone = document.getElementById('newPatientPhone').value.trim();
     const id = uid();
-    state.patients.push({ id, name, number: String(nextNum) });
+    state.patients.push({ id, name, number: String(nextNum), phone });
     await setData('patients:' + state.currentClinicId, state.patients);
     await setData('clinics', state.clinics);
     await logActivity('add_patient', `أضاف مريض جديد: ${name} (رقم ${nextNum})`);
@@ -1683,7 +1858,7 @@ async function deleteMainCategory(catId){
   const msg = itemsCount
     ? `حذف "${cat.label}" هيمسح معاه كل الأصناف اللي جواه (${itemsCount} صنف). متأكد؟`
     : `حذف "${cat.label}"؟`;
-  if(!confirm(msg)) return;
+  if(!(await confirmModal(msg, {danger:true}))) return;
   state.inventoryCategories = state.inventoryCategories.filter(c=>c.id !== catId);
   state.inventory = state.inventory.filter(i=>i.category !== catId);
   await saveInventoryCategories();
@@ -1893,7 +2068,7 @@ async function adjustInventoryQty(itemId, delta){
 }
 
 async function deleteInventoryItem(itemId){
-  if(!confirm('حذف الصنف ده؟')) return;
+  if(!(await confirmModal('حذف الصنف ده؟', {danger:true}))) return;
   const item = state.inventory.find(i=>i.id === itemId);
   state.inventory = state.inventory.filter(i=>i.id !== itemId);
   await saveInventory();
@@ -1960,7 +2135,9 @@ async function renderPatientView(){
         <div>
           <div class="pbig">${escapeHtml(patient.name)}</div>
           <div class="psub">رقم: ${escapeHtml(patient.number || '-')}</div>
+          <div class="psub">${patient.phone ? `<a class="wa-btn small" data-wa-link href="${buildWhatsappLinkWithText(patient.phone, buildPatientGreetingMessage(patient))}" target="_blank" rel="noopener">💬 ${escapeHtml(patient.phone)}</a>` : 'مفيش رقم موبايل'}</div>
           <div class="psub">نوع البراكيت: <b>${bracketSystemLabel(file.bracketSystem)}</b> <button class="secondary small" id="editBracketSystemBtn" style="padding:2px 8px;">تغيير</button></div>
+          ${computeMissedMonths(file.monthlyLog) >= 2 ? `<div class="psub" style="margin-top:6px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${computeMissedMonths(file.monthlyLog)} شهر</span></div>` : ''}
         </div>
         <button class="secondary small" id="editPatientBtn">تعديل البيانات</button>
       </div>
@@ -2106,7 +2283,7 @@ function attachPatientHandlers(){
     state.view = 'patients';
     state.clinicSummaryLoading = true;
     render();
-    await loadClinicMonthlySummary(state.currentClinicId, state.clinicSummaryMonth || currentMonthStr());
+    await loadClinicPatientAggregates(state.currentClinicId, state.clinicSummaryMonth || currentMonthStr());
     render();
   };
   document.querySelectorAll('.tab').forEach(el=>{
@@ -2375,7 +2552,7 @@ async function swapPhotoSlots(fromSection, fromVisit, fromCategory, fromSlot, to
 }
 
 async function deletePhotoSlot(section, visitId, category, slotId){
-  if(!confirm('حذف الصورة دي؟')) return;
+  if(!(await confirmModal('حذف الصورة دي؟', {danger:true}))) return;
   const pFile = state.currentPatientFile;
   const slotsObj = getSlotsObj(section, visitId, category);
   if(!slotsObj || !slotsObj[slotId]) return;
@@ -2391,7 +2568,7 @@ async function deletePhotoSlot(section, visitId, category, slotId){
 async function addDuringVisit(){
   const pFile = state.currentPatientFile;
   const photos = ensurePhotos(pFile);
-  const dateStr = prompt('تاريخ الزيارة (YYYY-MM-DD)', new Date().toISOString().slice(0,10));
+  const dateStr = await promptModal('تاريخ الزيارة', new Date().toISOString().slice(0,10), {type:'date', label:'تاريخ الزيارة'});
   if(!dateStr) return;
   const visit = { id: uid(), date: dateStr, extraoral:{}, intraoral:{} };
   photos.during.push(visit);
@@ -2402,7 +2579,7 @@ async function addDuringVisit(){
 }
 
 async function deleteDuringVisit(visitId){
-  if(!confirm('حذف الزيارة دي بكل صورها؟')) return;
+  if(!(await confirmModal('حذف الزيارة دي بكل صورها؟', {danger:true}))) return;
   const pFile = state.currentPatientFile;
   const photos = ensurePhotos(pFile);
   const v = photos.during.find(x=>x.id===visitId);
@@ -2742,7 +2919,7 @@ async function updateMonthlyEntry(id, changes){
 }
 
 async function deleteMonthlyEntry(id){
-  if(!confirm('حذف المتابعة دي؟')) return;
+  if(!(await confirmModal('حذف المتابعة دي؟', {danger:true}))) return;
   const file = state.currentPatientFile;
   file.monthlyLog = (file.monthlyLog||[]).filter(x=>x.id!==id);
   await savePatientFile(state.currentPatientId, stripHelperFields(file));
@@ -2843,7 +3020,7 @@ async function removeMaterialUse(entryId, useId){
   const msg = isLinkedRebond
     ? 'إلغاء الاستخدام ده هيرجع الكمية للمخزن، ويشيل سجل الكسر المرتبط من خريطة الفصوص، ويمسح رسوم الـ300 جنيه المرتبطة بيه من الحسابات (لو موجودة). متأكد؟'
     : 'إلغاء الاستخدام ده وإرجاع الكمية للمخزن؟';
-  if(!confirm(msg)) return;
+  if(!(await confirmModal(msg, {danger:true}))) return;
 
   const item = state.inventory.find(i=>i.id === use.itemId);
   if(item){
@@ -3107,7 +3284,7 @@ function extractToothMentions(text){
   // returns FDI tooth numbers mentioned near a rebonding/فص keyword, in either FDI (e.g. "11") or Palmer (e.g. "LL2") form.
   // Supports multiple teeth in one mention, e.g. "rebonding (25,13,LL6,UR3)" or "rebonding 25,13,ll6 و ur3".
   const teeth = new Set();
-  const KEYWORD_RE = /rebonding|ريبوندنج|ريبوندينج|فص/i;
+  const KEYWORD_RE = /rebonding|rebond|rbond|ريبوندنج|ريبوندينج|فص/i;
   const kwRe = new RegExp(KEYWORD_RE.source, 'gi');
   let km;
   while((km = kwRe.exec(text))){
@@ -3284,9 +3461,9 @@ async function scanAndDeductKeywords(entryId, text){
   // — blocked if it doesn't match the bracket system registered for this patient, or if none is set yet
   if(hasBracketRothMention(text)){
     if(!file.bracketSystem){
-      alert('نوع البراكيت للعيان ده لسه مش محدد — حدده الأول (ROTH ولا MBT) من فوق اسم المريض، وبعدين اكتب النص تاني عشان الخصم يبقى صح.');
+      await alertModal('نوع البراكيت للعيان ده لسه مش محدد — حدده الأول (ROTH ولا MBT) من فوق اسم المريض، وبعدين اكتب النص تاني عشان الخصم يبقى صح.');
     } else if(file.bracketSystem !== 'roth'){
-      alert(`لأ، العيان ده متسجل بنوع براكيت ${bracketSystemLabel(file.bracketSystem)} مش ROTH. لو النوع غلط، غيّره الأول من فوق اسم المريض وبعدين اكتب النص تاني.`);
+      await alertModal(`لأ، العيان ده متسجل بنوع براكيت ${bracketSystemLabel(file.bracketSystem)} مش ROTH. لو النوع غلط، غيّره الأول من فوق اسم المريض وبعدين اكتب النص تاني.`);
     } else {
       const key = 'bracket:roth';
       if(!matchedKeys.has(key)){
@@ -3297,9 +3474,9 @@ async function scanAndDeductKeywords(entryId, text){
   }
   if(hasBracketMbtMention(text)){
     if(!file.bracketSystem){
-      alert('نوع البراكيت للعيان ده لسه مش محدد — حدده الأول (ROTH ولا MBT) من فوق اسم المريض، وبعدين اكتب النص تاني عشان الخصم يبقى صح.');
+      await alertModal('نوع البراكيت للعيان ده لسه مش محدد — حدده الأول (ROTH ولا MBT) من فوق اسم المريض، وبعدين اكتب النص تاني عشان الخصم يبقى صح.');
     } else if(file.bracketSystem !== 'mbt'){
-      alert(`لأ، العيان ده متسجل بنوع براكيت ${bracketSystemLabel(file.bracketSystem)} مش MBT. لو النوع غلط، غيّره الأول من فوق اسم المريض وبعدين اكتب النص تاني.`);
+      await alertModal(`لأ، العيان ده متسجل بنوع براكيت ${bracketSystemLabel(file.bracketSystem)} مش MBT. لو النوع غلط، غيّره الأول من فوق اسم المريض وبعدين اكتب النص تاني.`);
     } else {
       const key = 'bracket:mbt';
       if(!matchedKeys.has(key)){
@@ -3322,13 +3499,13 @@ async function scanAndDeductKeywords(entryId, text){
   });
 
   if(rebondBlockedNoBracketSystem){
-    alert('في سن اتكتب معاه rebonding/فص بس نوع البراكيت للمريض ده لسه مش محدد (ROTH ولا MBT) — حدده الأول من فوق اسم المريض عشان الخصم يبقى من المخزن الصح، وبعدين اكتب النص تاني.');
+    await alertModal('في سن اتكتب معاه rebonding/فص بس نوع البراكيت للمريض ده لسه مش محدد (ROTH ولا MBT) — حدده الأول من فوق اسم المريض عشان الخصم يبقى من المخزن الصح، وبعدين اكتب النص تاني.');
   }
 
   if(!candidates.length) return;
 
   const msg = 'هيتخصم من المخزن تلقائي:\n' + candidates.map(c=>'- ' + c.label).join('\n') + '\n\nموافق؟';
-  if(!confirm(msg)) return;
+  if(!(await confirmModal(msg))) return;
 
   const bm = ensureBracketMap(file);
   const stockAlerts = [];
@@ -3593,7 +3770,7 @@ async function toggleTooth(num){
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
     toast(charged ? `اتسجل كسر السن ${fdiToPalmer(num)} + 300 جنيه` : `اتسجل كسر السن ${fdiToPalmer(num)}`);
   } else {
-    if(!confirm(`تأكيد إن السن ${fdiToPalmer(num)} اتصلح؟`)) return;
+    if(!(await confirmModal(`تأكيد إن السن ${fdiToPalmer(num)} اتصلح؟`))) return;
     t.status = 'green';
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
     toast(`السن ${fdiToPalmer(num)} رجع سليم`);
@@ -3602,7 +3779,7 @@ async function toggleTooth(num){
 }
 
 async function deleteBreakEntry(tooth, breakId){
-  if(!confirm('حذف سجل الكسر ده؟ ده هيشيل معاه أي رسوم مرتبطة في الحسابات، ولو الكسر ده كان جاي من "rebonding" في المتابعة الشهرية هيرجع الكمية المخصومة للمخزن تلقائي.')) return;
+  if(!(await confirmModal('حذف سجل الكسر ده؟ ده هيشيل معاه أي رسوم مرتبطة في الحسابات، ولو الكسر ده كان جاي من "rebonding" في المتابعة الشهرية هيرجع الكمية المخصومة للمخزن تلقائي.', {danger:true}))) return;
   const file = state.currentPatientFile;
   const bm = ensureBracketMap(file);
   const t = bm.teeth[tooth];
@@ -3741,24 +3918,24 @@ function attachDiagnosisHandlers(){
   });
   const resetBtn = document.getElementById('resetTemplateBtn');
   if(resetBtn) resetBtn.onclick = async () => {
-    if(!confirm('هيتمسح أي حاجة كتبتها في الشيت ده وهيترجع للشيت الافتراضي الفاضي. متأكد؟')) return;
+    if(!(await confirmModal('هيتمسح أي حاجة كتبتها في الشيت ده وهيترجع للشيت الافتراضي الفاضي. متأكد؟', {danger:true}))) return;
     const file = state.currentPatientFile;
     file.diagnosisSections = buildDefaultDiagnosisSections();
     await savePatientFile(state.currentPatientId, stripHelperFields(file));
     render();
   };
   const customBtn = document.getElementById('customAddBtn');
-  if(customBtn) customBtn.onclick = () => {
-    const title = prompt('اسم القسم؟');
+  if(customBtn) customBtn.onclick = async () => {
+    const title = await promptModal('اسم القسم؟', '', {label:'اسم القسم'});
     if(title && title.trim()) addDiagnosisSection(title.trim());
   };
   document.querySelectorAll('.diag-title').forEach(el=>{
     el.onchange = () => updateDiagnosisSection(el.dataset.id, {title: el.value});
   });
   document.querySelectorAll('.diag-rename').forEach(el=>{
-    el.onclick = () => {
+    el.onclick = async () => {
       const s = (state.currentPatientFile.diagnosisSections||[]).find(x=>x.id===el.dataset.id);
-      const title = prompt('اسم القسم الجديد؟', s ? s.title : '');
+      const title = await promptModal('اسم القسم الجديد؟', s ? s.title : '', {label:'اسم القسم'});
       if(title && title.trim()) updateDiagnosisSection(el.dataset.id, {title: title.trim()}).then(render);
     };
   });
@@ -3769,8 +3946,8 @@ function attachDiagnosisHandlers(){
     el.onclick = () => deleteDiagnosisSection(el.dataset.id);
   });
   document.querySelectorAll('.diag-custom-group').forEach(el=>{
-    el.onclick = () => {
-      const title = prompt('اسم المجموعة؟ (مثلاً Frontal)');
+    el.onclick = async () => {
+      const title = await promptModal('اسم المجموعة؟', '', {label:'مثلاً Frontal', placeholder:'Frontal'});
       if(title && title.trim()) addDiagnosisGroup(el.dataset.sec, title.trim());
     };
   });
@@ -3778,8 +3955,8 @@ function attachDiagnosisHandlers(){
     el.onchange = () => updateDiagnosisGroup(el.dataset.sec, el.dataset.group, {title: el.value});
   });
   document.querySelectorAll('.diag-custom-field').forEach(el=>{
-    el.onclick = () => {
-      const label = prompt('اسم الحقل؟');
+    el.onclick = async () => {
+      const label = await promptModal('اسم الحقل؟', '', {label:'اسم الحقل'});
       if(label && label.trim()) addDiagnosisField(el.dataset.sec, el.dataset.group || null, label.trim());
     };
   });
@@ -4054,6 +4231,10 @@ function openEditPatientModal(){
         <input type="text" id="editPatientName" value="${escapeHtml(patient.name)}">
       </div>
       <div class="field">
+        <label>رقم الموبايل (لإرسال واتساب)</label>
+        <input type="text" id="editPatientPhone" value="${escapeHtml(patient.phone || '')}" placeholder="01xxxxxxxxx">
+      </div>
+      <div class="field">
         <label>الرقم (تلقائي)</label>
         <input type="text" id="editPatientNumber" value="${escapeHtml(patient.number || '')}" disabled>
       </div>
@@ -4069,6 +4250,7 @@ function openEditPatientModal(){
   bg.onclick = (e) => { if(e.target === bg) bg.remove(); };
   document.getElementById('saveEditPatientBtn').onclick = async () => {
     patient.name = document.getElementById('editPatientName').value.trim() || patient.name;
+    patient.phone = document.getElementById('editPatientPhone').value.trim();
     await setData('patients:' + state.currentClinicId, state.patients);
     bg.remove();
     toast('اتحدثت البيانات');
@@ -4076,7 +4258,7 @@ function openEditPatientModal(){
     render();
   };
   document.getElementById('deletePatientBtn').onclick = async () => {
-    if(!confirm('متأكد إنك عايز تمسح المريض ده؟')) return;
+    if(!(await confirmModal('متأكد إنك عايز تمسح المريض ده؟', {danger:true}))) return;
     state.patients = state.patients.filter(p=>p.id !== patient.id);
     await setData('patients:' + state.currentClinicId, state.patients);
     await logActivity('delete_patient', `حذف مريض: ${patient.name} (رقم ${patient.number||'-'})`);
@@ -4365,7 +4547,7 @@ function openEditExtraModal(id){
 }
 
 async function deletePayment(id){
-  if(!confirm('حذف الدفعة دي؟')) return;
+  if(!(await confirmModal('حذف الدفعة دي؟', {danger:true}))) return;
   const file = state.currentPatientFile;
   const p = (file.payments||[]).find(x=>x.id===id);
   file.payments = (file.payments||[]).filter(p=>p.id !== id);
@@ -4383,7 +4565,7 @@ async function deleteFinanceExtra(id){
   const msg = isBreakCharge
     ? 'حذف الرسوم دي هيشيل معاها سجل الكسر المرتبط من خريطة الفصوص، ولو كان جاي من "rebonding" في المتابعة الشهرية هيرجع الكمية المخصومة للمخزن تلقائي. متأكد؟'
     : 'حذف الرسوم دي؟';
-  if(!confirm(msg)) return;
+  if(!(await confirmModal(msg, {danger:true}))) return;
 
   file.financeExtras = (file.financeExtras||[]).filter(e=>e.id !== id);
 
@@ -4485,7 +4667,7 @@ function attachGlobalLogoutButton(){
   btn.textContent = 'خروج';
   btn.className = 'secondary small';
   btn.style.cssText = 'position:fixed;top:10px;left:10px;z-index:999;';
-  btn.onclick = () => { if(confirm('تسجيل الخروج؟')) supabaseLogout(); };
+  btn.onclick = async () => { if(await confirmModal('تسجيل الخروج؟')) supabaseLogout(); };
   document.body.appendChild(btn);
 
   const logBtn = document.createElement('button');
