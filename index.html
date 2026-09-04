@@ -727,7 +727,7 @@ function buildWhatsappLink(raw){
 
 // ============ STATE ============
 let state = {
-  view: 'clinics', // 'clinics' | 'patients' | 'patient' | 'inventory'
+  view: 'clinics', // 'clinics' | 'patients' | 'patient' | 'inventory' | 'clinicAnalysis'
   clinics: [],
   currentClinicId: null,
   patients: [], // patients of current clinic
@@ -745,7 +745,12 @@ let state = {
   inventoryCategories: [],
   photoUrlCache: {}, // path -> {url, expiresAt} — temporary signed URLs for the (now private) photos bucket
   doctorName: 'MAHMOUD NASSAR',
-  monthlyKeywordsOpen: false
+  monthlyKeywordsOpen: false,
+  dismissedAlerts: {}, // alertKey -> signature (dismissed until the underlying value changes)
+  deletedRevealTeeth: [], // array of 'categoryId:toothNum' keys the user explicitly deleted from a reveal chart
+  clinicAnalysisMonth: null,
+  clinicAnalysisLoading: false,
+  clinicAnalysisData: null
 };
 
 const PHOTO_REMINDER_MONTHS = 3;
@@ -768,9 +773,54 @@ function formatDateAr(dateStr){
   if(parts.length !== 3) return dateStr;
   return `${parts[2]}/${parts[1]}/${parts[0]}`;
 }
+
+// ============ CLINIC VISIT SCHEDULE (manual recurring "أول تلات" / "تالت سبت" style) ============
+const WEEKDAY_LABELS_AR = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت']; // JS getDay() order (0=Sun)
+const ORDINAL_LABELS_AR = {1:'أول', 2:'تاني', 3:'تالت', 4:'رابع', '-1':'آخر'};
+function scheduleLabelAr(s){
+  return (ORDINAL_LABELS_AR[String(s.ordinal)] || s.ordinal) + ' ' + (WEEKDAY_LABELS_AR[s.weekday] || '');
+}
+// finds the date of the Nth (or last, ordinal=-1) occurrence of `weekday` in the given year/month (0-based month)
+function occurrenceInMonth(year, month, weekday, ordinal){
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const matches = [];
+  for(let day=1; day<=daysInMonth; day++){
+    const d = new Date(year, month, day);
+    if(d.getDay() === weekday) matches.push(day);
+  }
+  if(!matches.length) return null;
+  let day;
+  if(ordinal === -1){ day = matches[matches.length-1]; }
+  else { day = matches[ordinal-1]; if(day === undefined) return null; }
+  const mm = String(month+1).padStart(2,'0');
+  const dd = String(day).padStart(2,'0');
+  return `${year}-${mm}-${dd}`;
+}
+// next upcoming occurrence date (today or future) for one schedule entry
+function nextScheduleOccurrence(schedule){
+  const today = new Date(todayStr()+'T00:00:00');
+  for(let add=0; add<3; add++){
+    const y = today.getFullYear();
+    const m = today.getMonth() + add;
+    const d = new Date(y, m, 1);
+    const occ = occurrenceInMonth(d.getFullYear(), d.getMonth(), schedule.weekday, schedule.ordinal);
+    if(occ && occ >= todayStr()) return occ;
+  }
+  return null;
+}
+// all upcoming visits for a clinic, soonest first
+function clinicUpcomingVisits(clinic){
+  return (clinic.visitSchedules||[]).map(s=>{
+    const date = nextScheduleOccurrence(s);
+    return date ? {schedule:s, date, daysUntil: daysUntil(date)} : null;
+  }).filter(Boolean).sort((a,b)=> a.date.localeCompare(b.date));
+}
+
 function buildPatientGreetingMessage(patient){
   return `أهلاً ${patient.name} 👋`;
 }
+// patient counts as "مجاش" once missed months reach this (>2 months = 3+)
+const MISSED_MONTHS_ALERT_THRESHOLD = 3;
 // counts consecutive fully-completed calendar months (going backward from last month,
 // not counting the current in-progress month) with no monthly-follow-up entry at all.
 function computeMissedMonths(monthlyLog){
@@ -801,11 +851,26 @@ function monthsSince(dateStr){
   return Math.max(0, months);
 }
 
+// ============ CASE DURATION (case start / one-year / one-and-a-half-year tracking) ============
+const CASE_LONG_DURATION_MONTHS = 18; // "قعدت أكتر من سنة ونص"
+const CASE_ONE_YEAR_MONTHS = 12;
+// best-guess start date for a case: manual override wins, otherwise the earliest date recorded
+// anywhere for this patient (first monthly-follow-up entry or first "new case" event)
+function computeCaseStartDate(file){
+  if(file.caseStartDateOverride) return file.caseStartDateOverride;
+  const dates = [];
+  (file.monthlyLog||[]).forEach(e=>{ if(e.date) dates.push(e.date); });
+  (file.newCaseEvents||[]).forEach(e=>{ if(e.date) dates.push(e.date); });
+  if(!dates.length) return null;
+  return dates.sort()[0];
+}
+
 async function loadClinicPatientAggregates(clinicId, month){
   state.clinicSummaryLoading = true;
   let total = 0;
   const missedStatus = {};
   const bracketTypes = {};
+  const caseAlerts = {}; // patientId -> {months, oneYear, longDuration} — only for active cases with a known start date
   function applyFile(patientId, file){
     const payments = (file && file.payments) || [];
     payments.forEach(pay=>{
@@ -815,6 +880,13 @@ async function loadClinicPatientAggregates(clinicId, month){
     });
     missedStatus[patientId] = computeMissedMonths(file && file.monthlyLog);
     bracketTypes[patientId] = (file && file.bracketSystem) || '';
+    if(file && (file.caseStatus || 'active') === 'active'){
+      const startDate = computeCaseStartDate(file);
+      if(startDate){
+        const months = monthsSince(startDate);
+        caseAlerts[patientId] = { months, oneYear: months === CASE_ONE_YEAR_MONTHS, longDuration: months >= CASE_LONG_DURATION_MONTHS };
+      }
+    }
   }
   try{
     if(state.patients.length){
@@ -843,13 +915,188 @@ async function loadClinicPatientAggregates(clinicId, month){
   state.clinicSummaryTotal = total;
   state.clinicMissedStatus = missedStatus;
   state.clinicBracketTypes = bracketTypes;
+  state.clinicCaseAlerts = caseAlerts;
   state.clinicSummaryLoading = false;
+}
+
+// returns 'YYYY-MM' shifted by `delta` whole months (delta can be negative)
+function shiftMonthStr(ym, delta){
+  const [y,m] = (ym||currentMonthStr()).split('-').map(Number);
+  const d = new Date(y, (m-1) + delta, 1);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+
+// Shared per-patient-file metrics used by both the single-clinic and the all-clinics analysis
+// screens. `files` is an array of {patient, file} pairs (file may be missing for a brand-new
+// patient with nothing saved yet).
+function computeCaseStatsFromFiles(files, month){
+  const monthsBack = [1,2,3].map(n=>shiftMonthStr(month, -n)); // 3 months right before `month`
+  const allMonths = [month, ...monthsBack];
+  const perPatient = [];
+  const monthTotals = {}; allMonths.forEach(m=>monthTotals[m]=0);
+
+  const debondedThisMonth = [];
+  const turnedOneYearThisMonth = [];
+  const overLongDuration = [];
+  const paidOffStillActive = [];
+  let extractionCount = 0, nonExtractionCount = 0, growthModCount = 0;
+  let activeCasesCount = 0, debondedTotalCount = 0;
+
+  files.forEach(({patient, file})=>{
+    if(!file) return;
+    const payments = file.payments || [];
+    function sumForMonth(m){ return payments.filter(p=>(p.date||'').slice(0,7)===m).reduce((s,p)=>s+(parseFloat(p.amount)||0),0); }
+    const thisAmt = sumForMonth(month);
+    const prevAmts = monthsBack.map(sumForMonth);
+    allMonths.forEach((m,idx)=>{ monthTotals[m] += (idx===0 ? thisAmt : prevAmts[idx-1]); });
+
+    const newCaseDatesThisMonth = (file.newCaseEvents||[])
+      .filter(ev=>(ev.date||'').slice(0,7)===month)
+      .map(ev=>ev.date);
+    perPatient.push({ name: patient.name, thisAmt, prevAmts, newCaseDatesThisMonth });
+
+    const caseStatus = file.caseStatus || 'active';
+    if(caseStatus === 'debonded'){
+      debondedTotalCount++;
+      if((file.debondDate||'').slice(0,7) === month) debondedThisMonth.push({ name: patient.name, date: file.debondDate });
+      return;
+    }
+
+    activeCasesCount++;
+    const startDate = computeCaseStartDate(file);
+    if(startDate){
+      const months = monthsSince(startDate);
+      if(months >= CASE_LONG_DURATION_MONTHS) overLongDuration.push({ name: patient.name, date: startDate, months });
+      if(shiftMonthStr(startDate.slice(0,7), CASE_ONE_YEAR_MONTHS) === month) turnedOneYearThisMonth.push({ name: patient.name, date: startDate });
+    }
+
+    const total = parseFloat(file.financeTotal) || 0;
+    const extrasSum = (file.financeExtras||[]).reduce((s,e)=>s+(parseFloat(e.amount)||0),0);
+    const paidSum = payments.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
+    const caseValue = total + extrasSum;
+    if(caseValue > 0 && paidSum >= caseValue) paidOffStillActive.push({ name: patient.name, remaining: caseValue - paidSum });
+
+    const txPlan = (file.diagnosisSections||[]).find(s=>s.title==='Treatment Plan');
+    const findVal = (label) => txPlan ? (((txPlan.fields||[]).find(f=>(f.label||'').trim().toLowerCase()===label)||{}).value||'') : '';
+    const extractionVal = findVal('extraction / non-extraction');
+    const growthVal = findVal('growth modification');
+    if(extractionVal === 'Extraction') extractionCount++;
+    else if(extractionVal === 'Non-extraction') nonExtractionCount++;
+    if(growthVal === 'Yes') growthModCount++;
+  });
+
+  return {
+    perPatient, monthTotals, monthsBack, allMonths,
+    debondedThisMonth, turnedOneYearThisMonth, overLongDuration, paidOffStillActive,
+    extractionCount, nonExtractionCount, growthModCount, activeCasesCount, debondedTotalCount
+  };
+}
+
+// batch-fetches every patient file for `patients` (Supabase REST, falling back to per-item
+// getData on failure) and returns [{patient, file}, ...]
+async function batchLoadPatientFiles(patients){
+  const results = [];
+  try{
+    if(patients.length){
+      const keys = patients.map(p => '"patientfile:' + p.id + '"');
+      await ensureFreshSession();
+      const res = await fetch(
+        SUPABASE_REST + '?key=in.(' + keys.join(',') + ')&select=key,value',
+        { headers: supabaseHeaders() }
+      );
+      if(!res.ok) throw new Error('Supabase batch get failed: ' + res.status);
+      const rows = await res.json();
+      const byKey = {};
+      rows.forEach(row=>{ byKey[row.key] = row.value; });
+      patients.forEach(p=>{ results.push({ patient: p, file: byKey['patientfile:' + p.id] }); });
+    }
+  }catch(e){
+    console.error('batch patient file fetch failed', e);
+    results.length = 0;
+    for(const p of patients){
+      const file = await getData('patientfile:' + p.id, null);
+      results.push({ patient: p, file });
+    }
+  }
+  return results;
+}
+
+// ============ CLINIC MONTHLY ANALYSIS (income, patient stability, new cases, alerts) ============
+async function loadClinicAnalysisData(clinicId, month){
+  state.clinicAnalysisLoading = true;
+  const files = await batchLoadPatientFiles(state.patients);
+  const stats = computeCaseStatsFromFiles(files, month);
+
+  // categorize each patient's stability this month vs the average of the previous 3 months
+  const STABILITY_THRESHOLD = 0.15; // ±15% counts as "stable"
+  const groups = { stable:[], up:[], down:[], stopped:[] };
+  stats.perPatient.forEach(pd=>{
+    const avgPrev = (pd.prevAmts[0]+pd.prevAmts[1]+pd.prevAmts[2]) / 3;
+    if(pd.thisAmt === 0 && avgPrev === 0) return; // no payment data at all in this window — nothing to say
+    if(avgPrev === 0 && pd.thisAmt > 0){ groups.up.push(pd); return; } // started paying, nothing to compare to yet
+    if(pd.thisAmt === 0 && avgPrev > 0){ groups.stopped.push(pd); return; } // was paying, nothing this month
+    const ratio = (pd.thisAmt - avgPrev) / avgPrev;
+    if(Math.abs(ratio) <= STABILITY_THRESHOLD) groups.stable.push(pd);
+    else if(ratio > STABILITY_THRESHOLD) groups.up.push(pd);
+    else groups.down.push(pd);
+  });
+
+  const newCases = [];
+  stats.perPatient.forEach(pd=>{
+    pd.newCaseDatesThisMonth.forEach(d=>newCases.push({ name: pd.name, date: d }));
+  });
+
+  const incomeThisMonth = stats.monthTotals[month] || 0;
+  const avgPrev3 = (stats.monthTotals[stats.monthsBack[0]] + stats.monthTotals[stats.monthsBack[1]] + stats.monthTotals[stats.monthsBack[2]]) / 3;
+
+  const alerts = [];
+  if(newCases.length === 0) alerts.push('⚠ مفيش حالات جديدة اتسجلت الشهر ده');
+  if(avgPrev3 > 0 && incomeThisMonth < avgPrev3 * (1 - STABILITY_THRESHOLD)) alerts.push('⚠ فلوس المتابعات الشهر ده أقل من متوسط آخر 3 شهور');
+  if(stats.overLongDuration.length > 0) alerts.push(`⏳ فيه ${stats.overLongDuration.length} حالة قاعدة أكتر من سنة ونص في العلاج`);
+  if(stats.turnedOneYearThisMonth.length > 0) alerts.push(`🎂 ${stats.turnedOneYearThisMonth.length} حالة كمّلت سنة في العلاج الشهر ده`);
+
+  state.clinicAnalysisData = {
+    month, incomeThisMonth, avgPrev3, groups, newCases, alerts,
+    debondedThisMonth: stats.debondedThisMonth,
+    turnedOneYearThisMonth: stats.turnedOneYearThisMonth,
+    overLongDuration: stats.overLongDuration,
+    paidOffStillActive: stats.paidOffStillActive,
+    extractionCount: stats.extractionCount,
+    nonExtractionCount: stats.nonExtractionCount,
+    growthModCount: stats.growthModCount,
+    activeCasesCount: stats.activeCasesCount,
+    debondedTotalCount: stats.debondedTotalCount
+  };
+  state.clinicAnalysisLoading = false;
 }
 
 // ============ DATA LOADING ============
 async function loadClinics(){
   state.clinics = await getData('clinics', []);
   state.doctorName = await getData('doctorName', 'MAHMOUD NASSAR');
+  state.dismissedAlerts = await getData('dismissedAlerts', {});
+}
+
+// one-time migration: default every existing patient's bracket type to ROTH (even if MBT was
+// already set) — runs once ever, guarded by a flag, so it never re-overwrites later manual edits.
+async function runRothDefaultMigration(){
+  const done = await getData('migration_bracket_default_roth', false);
+  if(done) return;
+  try{
+    for(const c of state.clinics){
+      const patients = await getData('patients:' + c.id, []);
+      for(const p of patients){
+        const file = await getData('patientfile:' + p.id, null);
+        if(file){
+          file.bracketSystem = 'roth';
+          await setData('patientfile:' + p.id, file);
+        }
+      }
+    }
+  }catch(e){
+    console.error('roth default migration failed', e);
+  }
+  await setData('migration_bracket_default_roth', true);
 }
 async function saveDoctorName(){
   await setData('doctorName', state.doctorName);
@@ -859,6 +1106,7 @@ async function loadPatients(clinicId){
 }
 async function loadInventory(){
   state.inventory = await getData('inventory', []);
+  state.deletedRevealTeeth = await getData('deletedRevealTeeth', []);
   let dirty = false;
   if(state.inventory.length === 0 && state.clinics.length){
     // one-time migration from old per-clinic inventory keys
@@ -926,10 +1174,13 @@ async function loadInventory(){
   });
 
   // ensure a stock item exists for every tooth position under each Reveal (tooth-chart) category
+  // — skips any tooth the user explicitly deleted, so it doesn't silently come back
   const revealNums = [...FDI_TEETH_ROWS.upper, ...FDI_TEETH_ROWS.lower];
+  const deletedSet = new Set(state.deletedRevealTeeth || []);
   [REVEAL_CATEGORY_ID, REVEAL_MBT_CATEGORY_ID].forEach(catId=>{
     const existingRevealNums = new Set(state.inventory.filter(i=>i.category===catId).map(i=>i.toothNum));
     revealNums.forEach(num=>{
+      if(deletedSet.has(catId + ':' + num)) return;
       if(!existingRevealNums.has(num)){
         state.inventory.push({ id: uid(), name: 'فص ' + fdiToPalmer(num), qty: 0, threshold: -1, category: catId, toothNum: num, type:'', supplier:'', supplierWhatsapp:'', price:0 });
         dirty = true;
@@ -942,6 +1193,9 @@ async function loadInventory(){
 async function saveInventory(){
   await setData('inventory', state.inventory);
 }
+async function saveDeletedRevealTeeth(){
+  await setData('deletedRevealTeeth', state.deletedRevealTeeth);
+}
 async function saveInventoryCategories(){
   await setData('inventoryCategories', state.inventoryCategories);
 }
@@ -953,7 +1207,11 @@ async function loadPatientFile(patientId){
     financeExtras: [], // {id, amount, reason, date}
     bracketMap: null,
     monthlyLog: [], // {id, date, done, plan}
-    payments: [] // {id, amount, date, note}
+    payments: [], // {id, amount, date, note}
+    newCaseEvents: [], // {id, date, source:'keyword'|'manual', entryId?} — each time this patient was flagged as a "new case"
+    caseStatus: 'active', // 'active' | 'debonded' (فكت الحالة)
+    debondDate: null,
+    caseStartDateOverride: null // optional manual override of the computed case-start date
   });
   let dirty = false;
   if(!file.diagnosisSections || file.diagnosisSections.length === 0){
@@ -964,6 +1222,10 @@ async function loadPatientFile(patientId){
   }
   if(!file.financeExtras) file.financeExtras = [];
   if(!file.payments) file.payments = [];
+  if(!file.newCaseEvents) file.newCaseEvents = [];
+  if(!file.caseStatus) file.caseStatus = 'active';
+  if(file.debondDate === undefined) file.debondDate = null;
+  if(file.caseStartDateOverride === undefined) file.caseStartDateOverride = null;
   if(!file.bracketMap || !file.bracketMap.teeth){
     ensureBracketMap(file);
     dirty = true;
@@ -1055,7 +1317,12 @@ function buildDefaultDiagnosisSections(){
     mk('Space Management / Anchorage', {
       fields: ['Space management', 'Anchorage', 'Tooth out of wire', 'Wire sequence', 'Bite turbo']
     }),
-    mk('Treatment Plan', { fields: ['Extraction / Non-extraction', 'Upper plan', 'Lower plan'] })
+    mk('Treatment Plan', { fields: [
+      ['Extraction / Non-extraction', ['Extraction', 'Non-extraction']],
+      ['Growth modification', ['Yes', 'No']],
+      'Upper plan',
+      'Lower plan'
+    ] })
   ];
 }
 
@@ -1118,6 +1385,19 @@ function migrateExtraOralFrontalFields(sections){
     });
   }
 
+  const txPlan = sections.find(s => s.title === 'Treatment Plan');
+  if(txPlan){
+    addOptionsToField(txPlan, 'Extraction / Non-extraction', ['Extraction', 'Non-extraction']);
+    const hasGrowth = (txPlan.fields || []).some(x => x.label.trim().toLowerCase() === 'growth modification');
+    if(!hasGrowth){
+      const idx = (txPlan.fields || []).findIndex(x => x.label.trim().toLowerCase() === 'extraction / non-extraction');
+      const newField = { id: uid(), label: 'Growth modification', value: '', options: ['Yes', 'No'] };
+      if(idx >= 0) txPlan.fields.splice(idx + 1, 0, newField);
+      else txPlan.fields.push(newField);
+      changed = true;
+    }
+  }
+
   return changed;
 }
 
@@ -1140,6 +1420,111 @@ function renderFatalErrorScreen(err){
   document.getElementById('fatalLoginBtn').onclick = () => supabaseLogout();
 }
 
+// ============ NOTIFICATION CENTER (in-app alerts, dismissible) ============
+// gathers everything currently alert-worthy across the app. Each alert has a stable `key` and a
+// `signature` — dismissing stores key->signature, so the same alert re-appears if the underlying
+// value changes (item goes low again, missed-months count goes up, a new visit date comes due).
+function computeActiveAlerts(){
+  const alerts = [];
+  (state.inventory||[]).forEach(item=>{
+    if(isLowStockItem(item)){
+      const qty = parseFloat(item.qty)||0;
+      alerts.push({ key: 'lowstock:' + item.id, signature: String(qty), label: `📦 ${item.name} وصل لحد الإنذار (${qty})` });
+    }
+  });
+  (state.clinics||[]).forEach(c=>{
+    clinicUpcomingVisits(c).filter(v=>v.daysUntil<=2).forEach(v=>{
+      alerts.push({ key: 'clinicvisit:' + c.id + ':' + v.schedule.id + ':' + v.date, signature: v.date, label: `📅 ميعاد عيادة ${c.name} ${v.daysUntil<=0?'النهاردة':'بعد ' + v.daysUntil + ' يوم'} (${formatDateAr(v.date)})` });
+    });
+  });
+  if(state.clinicMissedStatus){
+    const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+    Object.keys(state.clinicMissedStatus).forEach(pid=>{
+      const missed = state.clinicMissedStatus[pid];
+      if(missed >= MISSED_MONTHS_ALERT_THRESHOLD){
+        const p = (state.patients||[]).find(x=>x.id===pid);
+        if(p){
+          alerts.push({ key: 'missed:' + pid, signature: String(missed), label: `⚠ ${p.name}${clinic?' — '+clinic.name:''} مجاش من ${missed} شهر` });
+        }
+      }
+    });
+  }
+  if(state.clinicCaseAlerts){
+    const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+    Object.keys(state.clinicCaseAlerts).forEach(pid=>{
+      const info = state.clinicCaseAlerts[pid];
+      const p = (state.patients||[]).find(x=>x.id===pid);
+      if(!p) return;
+      if(info.oneYear){
+        alerts.push({ key: 'oneyear:' + pid, signature: String(info.months), label: `🎂 ${p.name}${clinic?' — '+clinic.name:''} كمّل سنة في العلاج — يستاهل مراجعة` });
+      }
+      if(info.longDuration){
+        alerts.push({ key: 'longcase:' + pid, signature: String(info.months), label: `⏳ ${p.name}${clinic?' — '+clinic.name:''} قاعد في العلاج من ${info.months} شهر (أكتر من سنة ونص)` });
+      }
+    });
+  }
+  return alerts;
+}
+function isAlertDismissed(a){
+  return state.dismissedAlerts && state.dismissedAlerts[a.key] === a.signature;
+}
+function activeUndismissedAlerts(){
+  return computeActiveAlerts().filter(a=>!isAlertDismissed(a));
+}
+async function dismissAlert(key, signature){
+  if(!state.dismissedAlerts) state.dismissedAlerts = {};
+  state.dismissedAlerts[key] = signature;
+  await setData('dismissedAlerts', state.dismissedAlerts);
+}
+function ensureNotificationBell(){
+  let btn = document.getElementById('globalNotifBtn');
+  if(!btn){
+    btn = document.createElement('button');
+    btn.id = 'globalNotifBtn';
+    btn.className = 'secondary small';
+    btn.style.cssText = 'position:fixed;top:10px;left:190px;z-index:999;';
+    btn.onclick = () => openNotificationsModal();
+    document.body.appendChild(btn);
+  }
+  const alerts = activeUndismissedAlerts();
+  btn.textContent = alerts.length ? `🔔 (${alerts.length})` : '🔔';
+  btn.classList.toggle('stock-alert-blink', alerts.length > 0);
+}
+function openNotificationsModal(){
+  const existing = document.getElementById('notifModalBg');
+  if(existing) existing.remove();
+  const alerts = activeUndismissedAlerts();
+  const bodyHtml = alerts.length ? alerts.map(a=>`
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;">
+      <span style="font-size:13px;">${escapeHtml(a.label)}</span>
+      <button class="secondary small" data-dismiss-alert="${a.key}" data-dismiss-sig="${escapeHtml(a.signature)}">إلغاء</button>
+    </div>
+  `).join('') : `<div class="placeholder">مفيش تنبيهات دلوقتي</div>`;
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.id = 'notifModalBg';
+  bg.innerHTML = `
+    <div class="modal">
+      <h3>التنبيهات</h3>
+      <div id="notifListBody">${bodyHtml}</div>
+      <div class="modal-actions">
+        <button id="closeNotifModalBtn">تمام</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  bg.onclick = (e) => { if(e.target === bg) bg.remove(); };
+  document.getElementById('closeNotifModalBtn').onclick = () => bg.remove();
+  bg.querySelectorAll('[data-dismiss-alert]').forEach(el=>{
+    el.onclick = async () => {
+      await dismissAlert(el.dataset.dismissAlert, el.dataset.dismissSig);
+      ensureNotificationBell();
+      bg.remove();
+      openNotificationsModal();
+    };
+  });
+}
+
 async function render(){
   const app = document.getElementById('app');
   try{
@@ -1156,7 +1541,11 @@ async function render(){
     } else if(state.view === 'inventory'){
       app.innerHTML = renderInventoryView();
       attachInventoryHandlers();
+    } else if(state.view === 'clinicAnalysis'){
+      app.innerHTML = renderClinicAnalysisView();
+      attachClinicAnalysisHandlers();
     }
+    ensureNotificationBell();
   }catch(err){
     renderFatalErrorScreen(err);
   }
@@ -1170,10 +1559,17 @@ function renderClinicsView(){
         const dueMonths = monthsSince(c.photoLastMarked);
         const photoDue = c.photoLastMarked ? (dueMonths >= PHOTO_REMINDER_MONTHS)
           : (c.createdAt ? monthsSince(c.createdAt) >= PHOTO_REMINDER_MONTHS : true);
+        const upcoming = clinicUpcomingVisits(c);
+        const soonVisit = upcoming.find(v => v.daysUntil <= 2);
         return `
         <div class="clinic-tile" data-id="${c.id}">
           <div class="name">${escapeHtml(c.name)}</div>
           <div class="count">نسبتك: ${c.commission ?? 70}%</div>
+          ${soonVisit ? `
+            <div class="photo-reminder stock-alert-blink" style="background:#fff8e1;color:#8a6d00;">
+              📅 ميعاد العيادة ${soonVisit.daysUntil<=0 ? 'النهاردة أو فات' : `بعد ${soonVisit.daysUntil} يوم`} (${formatDateAr(soonVisit.date)})
+            </div>
+          ` : ''}
           ${photoDue ? `
             <div class="photo-reminder stock-alert-blink">
               📷 محتاج تصوير الحالات الشهر ده
@@ -1185,6 +1581,10 @@ function renderClinicsView(){
               <button class="secondary small photo-mark-btn" data-clinic-photo="${c.id}">تعديل</button>
             </div>
           `}
+          <div class="photo-reminder" style="background:transparent;color:var(--muted);padding:2px 0;">
+            📅 ${upcoming.length ? 'الميعاد الجاي: ' + formatDateAr(upcoming[0].date) : 'مفيش ميعاد متسجل'}
+            <button class="secondary small clinic-schedule-btn" data-clinic-schedule="${c.id}">مواعيد العيادة</button>
+          </div>
         </div>
       `;}).join('')}
     </div>
@@ -1236,6 +1636,12 @@ function attachClinicsHandlers(){
     el.onclick = (e) => {
       e.stopPropagation();
       openPhotoMarkModal(el.dataset.clinicPhoto);
+    };
+  });
+  document.querySelectorAll('.clinic-schedule-btn').forEach(el=>{
+    el.onclick = (e) => {
+      e.stopPropagation();
+      openClinicScheduleModal(el.dataset.clinicSchedule);
     };
   });
   document.querySelectorAll('.clinic-tile').forEach(el=>{
@@ -1353,6 +1759,64 @@ async function markClinicPhotographed(clinicId, date){
   render();
 }
 
+function openClinicScheduleModal(clinicId){
+  const c = state.clinics.find(x=>x.id===clinicId);
+  if(!c) return;
+  if(!c.visitSchedules) c.visitSchedules = [];
+  const listHtml = c.visitSchedules.length ? c.visitSchedules.map(s=>{
+    const next = nextScheduleOccurrence(s);
+    return `
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span>${escapeHtml(scheduleLabelAr(s))} كل شهر — الجاي: ${next ? formatDateAr(next) : '—'}</span>
+        <button class="danger small" data-del-schedule="${s.id}">حذف</button>
+      </div>
+    `;
+  }).join('') : `<div class="placeholder" style="margin-bottom:10px;">لسه مفيش ميعاد متسجل للعيادة دي</div>`;
+
+  const weekdayOptionsHtml = WEEKDAY_LABELS_AR.map((lbl,i)=>`<option value="${i}">${lbl}</option>`).join('');
+  const ordinalOptionsHtml = [1,2,3,4,-1].map(o=>`<option value="${o}">${ORDINAL_LABELS_AR[String(o)]}</option>`).join('');
+
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal">
+      <h3>مواعيد عيادة ${escapeHtml(c.name)}</h3>
+      <div id="scheduleListBody">${listHtml}</div>
+      <div class="section-title" style="font-size:13px;margin-top:14px;">إضافة ميعاد جديد</div>
+      <div class="row" style="gap:8px;">
+        <select id="newScheduleOrdinal">${ordinalOptionsHtml}</select>
+        <select id="newScheduleWeekday">${weekdayOptionsHtml}</select>
+      </div>
+      <div class="placeholder" style="padding:6px 0;font-size:12px;">مثلاً "أول تلات" أو "تالت سبت" — هيتكرر كل شهر تلقائي، ولو غيّرته بعدين هيشتغل بالجديد بس</div>
+      <div class="modal-actions">
+        <button class="secondary" id="addScheduleBtn">+ إضافة الميعاد ده</button>
+        <button id="closeScheduleModalBtn">تمام</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  bg.onclick = (e) => { if(e.target === bg) bg.remove(); };
+  document.getElementById('closeScheduleModalBtn').onclick = () => { bg.remove(); render(); };
+  document.getElementById('addScheduleBtn').onclick = async () => {
+    const weekday = parseInt(document.getElementById('newScheduleWeekday').value, 10);
+    const ordinal = parseInt(document.getElementById('newScheduleOrdinal').value, 10);
+    c.visitSchedules.push({ id: uid(), weekday, ordinal });
+    await setData('clinics', state.clinics);
+    toast('اتضاف الميعاد');
+    bg.remove();
+    openClinicScheduleModal(clinicId);
+  };
+  bg.querySelectorAll('[data-del-schedule]').forEach(el=>{
+    el.onclick = async () => {
+      c.visitSchedules = c.visitSchedules.filter(s=>s.id !== el.dataset.delSchedule);
+      await setData('clinics', state.clinics);
+      toast('اتمسح الميعاد');
+      bg.remove();
+      openClinicScheduleModal(clinicId);
+    };
+  });
+}
+
 // ============ PATIENTS VIEW ============
 function renderPatientListHtml(){
   const term = state.searchTerm.trim().toLowerCase();
@@ -1388,7 +1852,7 @@ function renderPatientListHtml(){
             ${p.phone ? `<a class="wa-btn small" data-wa-link href="${buildWhatsappLinkWithText(p.phone, buildPatientGreetingMessage(p))}" target="_blank" rel="noopener">💬 ${escapeHtml(p.phone)}</a>` : `<span class="pmeta">مفيش رقم موبايل</span>`}
             <span class="pmeta">نوع البراكيت: ${bracketSystemLabel(bracketType)}</span>
           </div>
-          ${missed >= 2 ? `<div style="margin-top:4px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${missed} شهر</span></div>` : ''}
+          ${missed >= MISSED_MONTHS_ALERT_THRESHOLD ? `<div style="margin-top:4px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${missed} شهر</span></div>` : ''}
         </div>
         <div style="color:var(--muted);font-size:18px;">‹</div>
       </li>
@@ -1445,8 +1909,9 @@ function renderPatientsView(){
     </div>
     <div class="top-actions">
       <button id="addPatientBtn">+ إضافة مريض</button>
-      <button class="secondary${(state.clinicMissedStatus && Object.values(state.clinicMissedStatus).some(m=>m>=2)) ? ' btn-stock-alert' : ''}" id="toggleSortBtn">↕ ترتيب: ${state.patientSortMode==='number' ? 'بالأرقام' : 'أبجدي'}</button>
+      <button class="secondary${(state.clinicMissedStatus && Object.values(state.clinicMissedStatus).some(m=>m>=MISSED_MONTHS_ALERT_THRESHOLD)) ? ' btn-stock-alert' : ''}" id="toggleSortBtn">↕ ترتيب: ${state.patientSortMode==='number' ? 'بالأرقام' : 'أبجدي'}${(state.clinicMissedStatus && Object.values(state.clinicMissedStatus).some(m=>m>=MISSED_MONTHS_ALERT_THRESHOLD)) ? ' <span style="color:#f5b700;">⚠</span>' : ''}</button>
       <button class="secondary" id="editClinicBtn">تعديل نسبة العيادة</button>
+      <button class="secondary" id="openClinicAnalysisBtn">📊 تحليل الشهر</button>
     </div>
     <div class="card">
       <input type="text" id="searchPatient" placeholder="بحث بالاسم أو الرقم..." value="${escapeHtml(state.searchTerm)}" style="width:100%;margin-bottom:12px;">
@@ -1466,6 +1931,14 @@ function attachPatientsHandlers(){
     render();
   };
   document.getElementById('editClinicBtn').onclick = () => openEditClinicModal();
+  document.getElementById('openClinicAnalysisBtn').onclick = async () => {
+    state.view = 'clinicAnalysis';
+    if(!state.clinicAnalysisMonth) state.clinicAnalysisMonth = currentMonthStr();
+    state.clinicAnalysisLoading = true;
+    render();
+    await loadClinicAnalysisData(state.currentClinicId, state.clinicAnalysisMonth);
+    render();
+  };
   const monthInput = document.getElementById('clinicSummaryMonth');
   if(monthInput) monthInput.onchange = async () => {
     state.clinicSummaryMonth = monthInput.value;
@@ -1484,6 +1957,103 @@ function attachPatientsHandlers(){
     }
   };
   attachPatientListHandlers();
+}
+
+const AR_MONTHS_FULL = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function monthLabelAr(ym){
+  const [y,m] = (ym||'').split('-');
+  const idx = parseInt(m,10) - 1;
+  return (AR_MONTHS_FULL[idx] || m) + ' ' + y;
+}
+
+function renderClinicAnalysisView(){
+  const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+  const commissionPct = clinic ? (parseFloat(clinic.commission) || 70) : 70;
+  const month = state.clinicAnalysisMonth || currentMonthStr();
+  const data = state.clinicAnalysisData;
+
+  let bodyHtml;
+  if(state.clinicAnalysisLoading || !data || data.month !== month){
+    bodyHtml = `<div class="placeholder" style="margin-top:10px;">جارِ التحليل...</div>`;
+  } else {
+    const yourShare = data.incomeThisMonth * (commissionPct/100);
+    const clinicShare = data.incomeThisMonth - yourShare;
+    const trendPct = data.avgPrev3 > 0 ? Math.round(((data.incomeThisMonth - data.avgPrev3)/data.avgPrev3)*100) : null;
+
+    const alertsHtml = data.alerts.length ? `
+      <div class="card" style="background:#fff3f0;border-color:var(--red);margin-bottom:14px;">
+        ${data.alerts.map(a=>`<div class="bracket-alert" style="margin-bottom:6px;">${escapeHtml(a)}</div>`).join('')}
+      </div>
+    ` : '';
+
+    const patientChips = (list) => list.length
+      ? `<div class="stage-tags">${list.map(p=>`<span class="stage-date-chip">${escapeHtml(p.name)} <span style="color:var(--muted);">(${(p.thisAmt||0).toLocaleString()} جنيه)</span></span>`).join('')}</div>`
+      : `<div class="placeholder" style="padding:6px 0;">لا يوجد</div>`;
+
+    const newCasesHtml = data.newCases.length
+      ? `<div class="stage-tags">${data.newCases.map(nc=>`<span class="stage-date-chip">🆕 ${escapeHtml(nc.name)} — ${formatDateAr(nc.date)}</span>`).join('')}</div>`
+      : `<div class="placeholder" style="padding:6px 0;">مفيش حالات جديدة الشهر ده</div>`;
+
+    bodyHtml = `
+      ${alertsHtml}
+      <div class="card" style="margin-bottom:14px;">
+        <div class="section-title" style="margin:0 0 8px;">دخل الشهر</div>
+        <div class="bracket-summary">
+          <div class="bracket-stat"><div class="num">${data.incomeThisMonth.toLocaleString()}</div><div class="lbl">إجمالي المدفوع</div></div>
+          <div class="bracket-stat"><div class="num">${yourShare.toLocaleString()}</div><div class="lbl">نصيبك (${commissionPct}%)</div></div>
+          <div class="bracket-stat"><div class="num">${clinicShare.toLocaleString()}</div><div class="lbl">نصيب العيادة</div></div>
+        </div>
+        ${trendPct !== null ? `<div class="psub" style="margin-top:8px;">مقارنة بمتوسط آخر 3 شهور (${Math.round(data.avgPrev3).toLocaleString()} جنيه): <b style="color:${trendPct<0?'var(--red)':'inherit'};">${trendPct>0?'+':''}${trendPct}%</b></div>` : ''}
+      </div>
+      <div class="card" style="margin-bottom:14px;">
+        <div class="section-title" style="margin:0 0 8px;">حالات جديدة الشهر ده (${data.newCases.length})</div>
+        ${newCasesHtml}
+      </div>
+      <div class="card" style="margin-bottom:14px;">
+        <div class="section-title" style="margin:0 0 8px;">استقرار المرضى (مقارنة بمتوسط دفعاتهم في آخر 3 شهور)</div>
+        <div class="lbl">✅ مستقر</div>
+        ${patientChips(data.groups.stable)}
+        <div class="lbl" style="margin-top:10px;">📈 بيزيد</div>
+        ${patientChips(data.groups.up)}
+        <div class="lbl" style="margin-top:10px;color:var(--red);">📉 نازل</div>
+        ${patientChips(data.groups.down)}
+        <div class="lbl" style="margin-top:10px;color:var(--red);">⛔ متوقف الشهر ده</div>
+        ${patientChips(data.groups.stopped)}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="breadcrumb">
+      <span class="crumb" id="crumbClinics3">العيادات</span>
+      <span class="sep">/</span>
+      <span class="crumb" id="crumbPatients2">${escapeHtml(clinic ? clinic.name : '')}</span>
+      <span class="sep">/</span>
+      <span>تحليل الشهر</span>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;flex-wrap:wrap;">
+        <div class="section-title" style="margin:0;">تحليل شهر ${monthLabelAr(month)}</div>
+        <input type="month" id="clinicAnalysisMonthInput" value="${escapeHtml(month)}">
+      </div>
+    </div>
+    ${bodyHtml}
+  `;
+}
+
+function attachClinicAnalysisHandlers(){
+  document.getElementById('crumbClinics3').onclick = () => { state.view = 'clinics'; render(); };
+  document.getElementById('crumbPatients2').onclick = () => { state.view = 'patients'; render(); };
+  const monthInput = document.getElementById('clinicAnalysisMonthInput');
+  if(monthInput){
+    monthInput.onchange = async () => {
+      state.clinicAnalysisMonth = monthInput.value;
+      state.clinicAnalysisLoading = true;
+      render();
+      await loadClinicAnalysisData(state.currentClinicId, state.clinicAnalysisMonth);
+      render();
+    };
+  }
 }
 
 function openPatientModal(){
@@ -1574,9 +2144,14 @@ const REFILL_ALERT_THRESHOLD = 2; // refill (reveal) items alert when qty drops 
 
 // Unified low-stock check: refill (per-tooth) items alert below REFILL_ALERT_THRESHOLD,
 // everything else alerts using its own "threshold" field.
+function revealCategoryThreshold(catId){
+  const cat = state.inventoryCategories.find(c=>c.id === catId);
+  const th = cat ? parseFloat(cat.threshold) : NaN;
+  return isNaN(th) ? REFILL_ALERT_THRESHOLD : th;
+}
 function isLowStockItem(item){
   const qty = parseFloat(item.qty) || 0;
-  if(item.category === REVEAL_CATEGORY_ID || item.category === REVEAL_MBT_CATEGORY_ID) return qty < REFILL_ALERT_THRESHOLD;
+  if(item.category === REVEAL_CATEGORY_ID || item.category === REVEAL_MBT_CATEGORY_ID) return qty < revealCategoryThreshold(item.category);
   const th = parseFloat(item.threshold) || 0;
   return qty <= th;
 }
@@ -1687,10 +2262,11 @@ function renderInventoryView(){
   `;
 }
 
-function renderRevealToothBox(item){
+function renderRevealToothBox(item, categoryThreshold){
   const qty = parseFloat(item && item.qty) || 0;
   const out = qty <= 0;
-  const low = !out && qty < REFILL_ALERT_THRESHOLD;
+  const th = categoryThreshold===undefined ? REFILL_ALERT_THRESHOLD : categoryThreshold;
+  const low = !out && qty < th;
   return `
     <div class="tooth reveal-tooth ${out?'broken':(low?'low-refill':'')}" data-reveal-item="${item.id}" title="${escapeHtml(item.name)} — الكمية المتاحة: ${qty}${low ? ' ⚠ ناقص' : ''}">
       <span class="badge">${qty}</span>
@@ -1703,9 +2279,11 @@ function renderRevealCategoryBody(cat){
   const items = state.inventory.filter(i => i.category === cat.id);
   const byTooth = {};
   items.forEach(i => byTooth[i.toothNum] = i);
-  const upperRow = FDI_TEETH_ROWS.upper.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderRevealToothBox(byTooth[n])).join('');
-  const lowerRow = FDI_TEETH_ROWS.lower.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderRevealToothBox(byTooth[n])).join('');
+  const th = revealCategoryThreshold(cat.id);
+  const upperRow = FDI_TEETH_ROWS.upper.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderRevealToothBox(byTooth[n], th)).join('');
+  const lowerRow = FDI_TEETH_ROWS.lower.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderRevealToothBox(byTooth[n], th)).join('');
   return `
+    <div class="placeholder" style="text-align:right;padding:8px;margin-bottom:4px;">حد الإنذار الحالي لكل الأسنان هنا: <b>${th}</b> — يتغيّر من زرار "تعديل" فوق</div>
     <div class="tooth-arch">
       <div class="arch-label">الفك العلوي (Upper)</div>
       <div class="tooth-row">${upperRow}</div>
@@ -1714,7 +2292,7 @@ function renderRevealCategoryBody(cat){
       <div class="arch-label">الفك السفلي (Lower)</div>
       <div class="tooth-row">${lowerRow}</div>
     </div>
-    <div class="placeholder" style="text-align:right;padding:10px;">دوس على أي فص عشان تعدّل الكمية المتاحة منه، أو دبل كليك عشان تخصم وحدة واحدة منه على طول — والعدد بينقص لوحده كمان لما يتستخدم من تبويب "المتابعة الشهرية" لأي مريض</div>
+    <div class="placeholder" style="text-align:right;padding:10px;">دوس على أي فص عشان تعدّل الكمية المتاحة منه، أو دبل كليك عشان تخصم وحدة واحدة منه على طول — والعدد بينقص لوحده كمان لما يتستخدم من تبويب "المتابعة الشهرية" لأي مريض. تقدر كمان تمسح فص معين خالص من الشارت من جوه شاشة تعديل الكمية بتاعته</div>
   `;
 }
 
@@ -1728,6 +2306,7 @@ function openEditRevealQtyModal(itemId){
       <h3>الكمية المتاحة — فص ${escapeHtml(fdiToPalmer(item.toothNum))}</h3>
       <div class="field"><label>الكمية</label><input type="number" id="revealQtyInput" value="${parseFloat(item.qty)||0}" min="0"></div>
       <div class="modal-actions">
+        <button class="danger" id="deleteRevealToothBtn">مسح الفص ده من الشارت</button>
         <button class="secondary" id="cancelRevealQtyBtn">إلغاء</button>
         <button id="saveRevealQtyBtn">حفظ</button>
       </div>
@@ -1736,6 +2315,10 @@ function openEditRevealQtyModal(itemId){
   document.body.appendChild(bg);
   document.getElementById('cancelRevealQtyBtn').onclick = () => bg.remove();
   bg.onclick = (e) => { if(e.target === bg) bg.remove(); };
+  document.getElementById('deleteRevealToothBtn').onclick = async () => {
+    bg.remove();
+    await deleteRevealTooth(itemId);
+  };
   document.getElementById('saveRevealQtyBtn').onclick = async () => {
     const qty = Math.max(0, parseFloat(document.getElementById('revealQtyInput').value) || 0);
     item.qty = qty;
@@ -1745,6 +2328,19 @@ function openEditRevealQtyModal(itemId){
     render();
   };
   setTimeout(()=>document.getElementById('revealQtyInput').focus(), 50);
+}
+
+async function deleteRevealTooth(itemId){
+  const item = state.inventory.find(i=>i.id === itemId);
+  if(!item) return;
+  if(!(await confirmModal(`متأكد إنك عاوز تمسح فص ${fdiToPalmer(item.toothNum)} خالص من شارت ${item.category === REVEAL_MBT_CATEGORY_ID ? 'MBT' : 'ROTH'}؟`, {danger:true}))) return;
+  const key = item.category + ':' + item.toothNum;
+  state.inventory = state.inventory.filter(i=>i.id !== itemId);
+  if(!state.deletedRevealTeeth.includes(key)) state.deletedRevealTeeth.push(key);
+  await saveInventory();
+  await saveDeletedRevealTeeth();
+  toast('اتمسح الفص من الشارت');
+  render();
 }
 
 async function quickDeductRevealItem(itemId){
@@ -1819,12 +2415,16 @@ function attachInventoryHandlers(){
 function openEditMainCategoryModal(catId){
   const cat = state.inventoryCategories.find(c=>c.id === catId);
   if(!cat) return;
+  const thresholdFieldHtml = cat.toothChart
+    ? `<div class="field"><label>حد الإنذار (لكل الأسنان في القسم ده)</label><input type="number" id="editMainCategoryThreshold" value="${parseFloat(cat.threshold)||REFILL_ALERT_THRESHOLD}" min="0"></div>`
+    : '';
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
   bg.innerHTML = `
     <div class="modal">
       <h3>تعديل الصنف الرئيسي</h3>
       <div class="field"><label>اسم الصنف الرئيسي</label><input type="text" id="editMainCategoryLabel" value="${escapeHtml(cat.label)}"></div>
+      ${thresholdFieldHtml}
       <div class="modal-actions">
         <button class="secondary" id="cancelEditMainCategoryBtn">إلغاء</button>
         <button id="saveEditMainCategoryBtn">حفظ</button>
@@ -1838,6 +2438,10 @@ function openEditMainCategoryModal(catId){
     const label = document.getElementById('editMainCategoryLabel').value.trim();
     if(!label){ toast('اكتب اسم الصنف الرئيسي'); return; }
     cat.label = label;
+    if(cat.toothChart){
+      const th = document.getElementById('editMainCategoryThreshold');
+      if(th) cat.threshold = parseFloat(th.value) || 0;
+    }
     await saveInventoryCategories();
     bg.remove();
     toast('اتعدل الصنف الرئيسي');
@@ -1963,6 +2567,7 @@ function openEditInventoryItemModal(itemId){
     <div class="modal">
       <h3>تعديل: ${escapeHtml(item.name)}</h3>
       <div class="field"><label>اسم الصنف</label><input type="text" id="editItemName" value="${escapeHtml(item.name||'')}"></div>
+      <div class="field"><label>حد الإنذار (نبهني لما توصل للرقم ده)</label><input type="number" id="editItemThreshold" value="${parseFloat(item.threshold)||0}"></div>
       <div class="field"><label>النوع</label>${typeFieldHtml}</div>
       <div class="field"><label>المورد</label><input type="text" id="editItemSupplier" value="${escapeHtml(item.supplier||'')}"></div>
       <div class="field"><label>رقم واتساب المورد</label><input type="text" id="editItemSupplierWhatsapp" value="${escapeHtml(item.supplierWhatsapp||'')}"></div>
@@ -1980,6 +2585,7 @@ function openEditInventoryItemModal(itemId){
     const name = document.getElementById('editItemName').value.trim();
     if(!name){ toast('اكتب اسم الصنف'); return; }
     item.name = name;
+    item.threshold = parseFloat(document.getElementById('editItemThreshold').value) || 0;
     item.type = document.getElementById('editItemType').value.trim();
     item.supplier = document.getElementById('editItemSupplier').value.trim();
     item.supplierWhatsapp = document.getElementById('editItemSupplierWhatsapp').value.trim();
@@ -2137,9 +2743,26 @@ async function renderPatientView(){
           <div class="psub">رقم: ${escapeHtml(patient.number || '-')}</div>
           <div class="psub">${patient.phone ? `<a class="wa-btn small" data-wa-link href="${buildWhatsappLinkWithText(patient.phone, buildPatientGreetingMessage(patient))}" target="_blank" rel="noopener">💬 ${escapeHtml(patient.phone)}</a>` : 'مفيش رقم موبايل'}</div>
           <div class="psub">نوع البراكيت: <b>${bracketSystemLabel(file.bracketSystem)}</b> <button class="secondary small" id="editBracketSystemBtn" style="padding:2px 8px;">تغيير</button></div>
-          ${computeMissedMonths(file.monthlyLog) >= 2 ? `<div class="psub" style="margin-top:6px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${computeMissedMonths(file.monthlyLog)} شهر</span></div>` : ''}
+          ${computeMissedMonths(file.monthlyLog) >= MISSED_MONTHS_ALERT_THRESHOLD ? `<div class="psub" style="margin-top:6px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${computeMissedMonths(file.monthlyLog)} شهر</span></div>` : ''}
+          ${(file.newCaseEvents||[]).length ? `<div class="psub" style="margin-top:4px;">🆕 حالات جديدة مسجلة: ${file.newCaseEvents.length} (آخرها ${formatDateAr([...file.newCaseEvents].sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0].date)})</div>` : ''}
+          ${(file.caseStatus||'active') === 'debonded' ? `
+            <div class="psub" style="margin-top:4px;">🔓 الحالة فكت${file.debondDate ? ' — ' + formatDateAr(file.debondDate) : ''}</div>
+          ` : (() => {
+            const startDate = computeCaseStartDate(file);
+            if(!startDate) return '';
+            const months = monthsSince(startDate);
+            const long = months >= CASE_LONG_DURATION_MONTHS;
+            return `<div class="psub${long?' stock-alert-blink':''}" style="margin-top:4px;${long?'color:var(--red);':''}">⏱ في العلاج من ${formatDateAr(startDate)} (${months} شهر)${long?' ⚠ أكتر من سنة ونص':''}</div>`;
+          })()}
         </div>
-        <button class="secondary small" id="editPatientBtn">تعديل البيانات</button>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <button class="secondary small" id="markNewCaseBtn">🆕 حالة جديدة</button>
+          ${(file.caseStatus||'active') === 'debonded'
+            ? `<button class="secondary small" id="reactivateCaseBtn">↩️ رجّع الحالة نشطة</button>`
+            : `<button class="secondary small" id="markDebondedBtn">🔓 الحالة فكت</button>`}
+          <button class="secondary small" id="editCaseStartBtn">⏱ تعديل تاريخ بداية الحالة</button>
+          <button class="secondary small" id="editPatientBtn">تعديل البيانات</button>
+        </div>
       </div>
     </div>
     <div class="tabs">${tabsHtml}</div>
@@ -2291,6 +2914,14 @@ function attachPatientHandlers(){
   });
   const editBtn = document.getElementById('editPatientBtn');
   if(editBtn) editBtn.onclick = () => openEditPatientModal();
+  const newCaseBtn = document.getElementById('markNewCaseBtn');
+  if(newCaseBtn) newCaseBtn.onclick = () => markNewCaseManually();
+  const debondBtn = document.getElementById('markDebondedBtn');
+  if(debondBtn) debondBtn.onclick = () => markCaseDebonded();
+  const reactivateBtn = document.getElementById('reactivateCaseBtn');
+  if(reactivateBtn) reactivateBtn.onclick = () => reactivateCase();
+  const editCaseStartBtn = document.getElementById('editCaseStartBtn');
+  if(editCaseStartBtn) editCaseStartBtn.onclick = () => editCaseStartDate();
   const editBracketSystemBtn = document.getElementById('editBracketSystemBtn');
   if(editBracketSystemBtn) editBracketSystemBtn.onclick = () => openEditBracketSystemModal();
   if(state.activeTab === 'diagnosis') attachDiagnosisHandlers();
@@ -2884,6 +3515,7 @@ function renderMonthlyTab(){
         <div><b>براكيت جديد:</b> اكتب <code>bracket roth</code> يخصم من صنف "براكيت" (ROTH) أو <code>bracket mbt</code> يخصم من صنف "براكيت" (MBT) — من غير ما تحدد رقم سن، ومش من مخزون الريفيل</div>
         <div><b>أستك:</b> اكتب المقاس بس زي <code>5/16</code> أو <code>5\\16</code> من غير ما تكتب كلمة "إيلاستيك"</div>
         <div><b>أي صنف تاني (زي ميني سكرو، بوتن...):</b> اكتب اسم الصنف زي ما هو مسجل بالظبط في المخزون — مش فارقة كابيتال/سمول ولا المسافات</div>
+        <div><b>حالة جديدة:</b> اكتب <code>NEW CASE</code> بأي شكل (كابيتال/سمول، بسبيس أو من غيره) وهتتسجل تلقائي في تحليل الحالات الجديدة للشهر ده — أو استخدم زرار "🆕 حالة جديدة" اللي فوق اسم المريض يدويًا</div>
       </div>
     </div>
   `;
@@ -2955,6 +3587,7 @@ function attachMonthlyHandlers(){
         const entry = (file.monthlyLog||[]).find(x=>x.id===id);
         const combined = [entry.doneUpper, entry.doneLower, entry.doneBoth].filter(Boolean).join('\n');
         await scanAndDeductKeywords(id, combined);
+        await scanNewCaseKeyword(id, combined);
       };
     });
   });
@@ -3284,7 +3917,7 @@ function extractToothMentions(text){
   // returns FDI tooth numbers mentioned near a rebonding/فص keyword, in either FDI (e.g. "11") or Palmer (e.g. "LL2") form.
   // Supports multiple teeth in one mention, e.g. "rebonding (25,13,LL6,UR3)" or "rebonding 25,13,ll6 و ur3".
   const teeth = new Set();
-  const KEYWORD_RE = /rebonding|rebond|rbond|ريبوندنج|ريبوندينج|فص/i;
+  const KEYWORD_RE = /rebonding|ريبوندنج|ريبوندينج|فص/i;
   const kwRe = new RegExp(KEYWORD_RE.source, 'gi');
   let km;
   while((km = kwRe.exec(text))){
@@ -3540,6 +4173,65 @@ async function scanAndDeductKeywords(entryId, text){
   await saveInventory();
   await savePatientFile(state.currentPatientId, stripHelperFields(file));
   toast(stockAlerts.length ? `اتخصم من المخزن — ⚠ ${stockAlerts.join('، ')} وصل لحد الإنذار` : 'اتخصم من المخزن');
+  render();
+}
+
+// ============ NEW CASE detection (keyword) ============
+// recognizes "NEW CASE" in the monthly-follow-up text regardless of case, spacing, or a missing
+// space (NEW CASE / new case / NEWCASE / newcase...) and logs it as a newCaseEvent for this
+// patient — separate from (and works alongside) the manual "حالة جديدة" button on the patient card.
+const NEW_CASE_REGEX = /new\s*case/i;
+async function scanNewCaseKeyword(entryId, text){
+  if(!text || !NEW_CASE_REGEX.test(text)) return;
+  const file = state.currentPatientFile;
+  if(!file.newCaseEvents) file.newCaseEvents = [];
+  if(file.newCaseEvents.some(ev=>ev.entryId === entryId)) return; // already logged for this monthly entry
+  const e = (file.monthlyLog||[]).find(x=>x.id===entryId);
+  const date = (e && e.date) || todayStr();
+  file.newCaseEvents.push({ id: uid(), date, source:'keyword', entryId });
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  toast('🆕 اتسجلت "حالة جديدة" للمريض ده الشهر ده (من كلمة NEW CASE)');
+}
+
+async function markNewCaseManually(){
+  const file = state.currentPatientFile;
+  if(!(await confirmModal('تسجيل "حالة جديدة" للمريض ده بتاريخ النهاردة؟ هيتحسب في تحليل الحالات الجديدة للشهر ده.'))) return;
+  if(!file.newCaseEvents) file.newCaseEvents = [];
+  file.newCaseEvents.push({ id: uid(), date: todayStr(), source:'manual' });
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  toast('اتسجلت حالة جديدة');
+  render();
+}
+
+async function markCaseDebonded(){
+  const file = state.currentPatientFile;
+  const date = await promptModal('تاريخ فك الحالة', todayStr(), {type:'date', label:'التاريخ'});
+  if(!date) return;
+  file.caseStatus = 'debonded';
+  file.debondDate = date;
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  toast('اتسجلت الحالة "فكت"');
+  render();
+}
+
+async function reactivateCase(){
+  const file = state.currentPatientFile;
+  if(!(await confirmModal('ترجيع الحالة دي "نشطة" تاني؟'))) return;
+  file.caseStatus = 'active';
+  file.debondDate = null;
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  toast('الحالة بقت نشطة تاني');
+  render();
+}
+
+async function editCaseStartDate(){
+  const file = state.currentPatientFile;
+  const current = computeCaseStartDate(file) || todayStr();
+  const date = await promptModal('تاريخ بداية الحالة (بيتحسب تلقائي من أول متابعة، تقدر تعدّله لو مش مضبوط)', current, {type:'date', label:'التاريخ'});
+  if(!date) return;
+  file.caseStartDateOverride = date;
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  toast('اتحفظ تاريخ بداية الحالة');
   render();
 }
 
@@ -4276,6 +4968,63 @@ function escapeHtml(str){
 }
 
 // ============ FINANCE TAB ============
+function printPatientStatement(){
+  const file = state.currentPatientFile;
+  const patient = state.patients.find(p=>p.id === state.currentPatientId);
+  const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+  if(!patient || !file) return;
+  const total = parseFloat(file.financeTotal) || 0;
+  const extras = file.financeExtras || [];
+  const extrasSum = extras.reduce((s,e)=> s + (parseFloat(e.amount)||0), 0);
+  const payments = file.payments || [];
+  const paidSum = payments.reduce((s,p)=> s + (parseFloat(p.amount)||0), 0);
+  const caseValue = total + extrasSum;
+  const remaining = caseValue - paidSum;
+  const paymentsSorted = [...payments].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const extrasSorted = [...extras].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+
+  const paymentsRows = paymentsSorted.map(p=>`<tr><td>${formatDateAr(p.date)}</td><td>${(parseFloat(p.amount)||0).toLocaleString()} جنيه</td><td>${escapeHtml(p.note||'')}</td></tr>`).join('') || '<tr><td colspan="3">لا يوجد دفعات</td></tr>';
+  const extrasRows = extrasSorted.map(e=>`<tr><td>${formatDateAr(e.date)}</td><td>${escapeHtml(e.reason||'')}</td><td>${(parseFloat(e.amount)||0).toLocaleString()} جنيه</td></tr>`).join('') || '<tr><td colspan="3">لا يوجد رسوم إضافية</td></tr>';
+
+  const html = `
+    <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
+    <title>كشف حساب — ${escapeHtml(patient.name)}</title>
+    <style>
+      body{font-family:Tahoma,Arial,sans-serif;padding:24px;color:#222;}
+      h1{font-size:20px;margin-bottom:4px;}
+      .meta{color:#555;font-size:13px;margin-bottom:18px;}
+      table{width:100%;border-collapse:collapse;margin-bottom:20px;}
+      th,td{border:1px solid #ccc;padding:6px 10px;text-align:right;font-size:13px;}
+      th{background:#f4f4f4;}
+      .totals{margin-top:10px;font-size:14px;}
+      .totals div{margin-bottom:4px;}
+      .totals b{display:inline-block;min-width:160px;}
+      @media print{ button{display:none;} }
+    </style>
+    </head><body>
+      <h1>كشف حساب — ${escapeHtml(patient.name)}</h1>
+      <div class="meta">
+        رقم المريض: ${escapeHtml(patient.number||'-')} | العيادة: ${escapeHtml(clinic?clinic.name:'')} | تاريخ الطباعة: ${formatDateAr(todayStr())}
+      </div>
+      <h3>الدفعات</h3>
+      <table><thead><tr><th>التاريخ</th><th>المبلغ</th><th>ملاحظة</th></tr></thead><tbody>${paymentsRows}</tbody></table>
+      <h3>رسوم إضافية</h3>
+      <table><thead><tr><th>التاريخ</th><th>السبب</th><th>المبلغ</th></tr></thead><tbody>${extrasRows}</tbody></table>
+      <div class="totals">
+        <div><b>إجمالي قيمة الحالة:</b> ${caseValue.toLocaleString()} جنيه</div>
+        <div><b>المدفوع:</b> ${paidSum.toLocaleString()} جنيه</div>
+        <div><b>المتبقي:</b> ${remaining.toLocaleString()} جنيه</div>
+      </div>
+      <button onclick="window.print()" style="margin-top:20px;padding:8px 16px;">طباعة / حفظ PDF</button>
+    </body></html>
+  `;
+  const w = window.open('', '_blank');
+  if(!w){ toast('المتصفح منع فتح نافذة جديدة — اسمح بالنوافذ المنبثقة وحاول تاني'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
 function renderFinanceTab(){
   const file = state.currentPatientFile;
   const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
@@ -4366,6 +5115,9 @@ function renderFinanceTab(){
 
   return `
     <div class="section-title">الحسابات</div>
+    <div class="row" style="margin-bottom:10px;">
+      <button class="secondary small" id="printStatementBtn">🖨️ طباعة / تصدير كشف الحساب</button>
+    </div>
     <div class="field" style="max-width:240px;">
       <label>التوتال المتفق عليه (بدون الإضافات)</label>
       <input type="number" id="financeTotalInput" value="${total}">
@@ -4593,6 +5345,8 @@ async function deleteFinanceExtra(id){
 }
 
 function attachFinanceHandlers(){
+  const printBtn = document.getElementById('printStatementBtn');
+  if(printBtn) printBtn.onclick = () => printPatientStatement();
   const totalInput = document.getElementById('financeTotalInput');
   if(totalInput) totalInput.onchange = () => updateFinanceTotal(totalInput.value);
   const addPaymentBtn = document.getElementById('addPaymentBtn');
@@ -4655,6 +5409,7 @@ async function boot(){
     await loadClinics();
     render();
     attachGlobalLogoutButton();
+    await runRothDefaultMigration();
   }catch(err){
     renderFatalErrorScreen(err);
   }
