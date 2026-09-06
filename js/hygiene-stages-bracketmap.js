@@ -2,21 +2,21 @@
 // ============ HYGIENE TAB ============
 const HYGIENE_LABELS = {excellent:'ممتازة', good:'جيدة', fair:'متوسطة', poor:'ضعيفة'};
 const HYGIENE_CLASS = {excellent:'hyg-excellent', good:'hyg-good', fair:'hyg-fair', poor:'hyg-poor'};
-
+ 
 function renderHygieneTab(){
   const file = state.currentPatientFile;
   const log = file.monthlyLog || [];
   const rated = log.filter(e=>e.hygieneRating).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const lastTwo = rated.slice(0,2);
   const concerning = lastTwo.length === 2 && lastTwo.every(e => e.hygieneRating==='poor' || e.hygieneRating==='fair');
-
+ 
   const rows = rated.map(e => `
     <div class="hygiene-row">
       <span class="hygiene-date">${escapeHtml(e.date||'')}</span>
       <span class="hygiene-chip ${HYGIENE_CLASS[e.hygieneRating]}">${HYGIENE_LABELS[e.hygieneRating]}</span>
     </div>
   `).join('');
-
+ 
   return `
     <div class="section-title">نظافة الأسنان</div>
     <div class="placeholder" style="text-align:right;padding:10px;margin-bottom:14px;">التقييم بيتسجل من تبويب المتابعة الشهرية لكل شهر</div>
@@ -26,7 +26,7 @@ function renderHygieneTab(){
     </div>
   `;
 }
-
+ 
 // ============ TREATMENT STAGES TAB ============
 function computeStageCounts(file){
   const counts = {};
@@ -38,13 +38,22 @@ function computeStageCounts(file){
   });
   return counts;
 }
-
+ 
 function renderStagesTab(){
   const file = state.currentPatientFile;
   const counts = computeStageCounts(file);
   const ALERT_THRESHOLD = 4;
-
-  const cards = TREATMENT_STAGES.map(st=>{
+ 
+  // registered stages (at least one entry) float to the top; stages with nothing recorded yet
+  // sink to the bottom. Array.sort is stable, so within each group the original TREATMENT_STAGES
+  // order is preserved.
+  const orderedStages = [...TREATMENT_STAGES].sort((a, b) => {
+    const aHas = (counts[a.id] || []).length > 0 ? 0 : 1;
+    const bHas = (counts[b.id] || []).length > 0 ? 0 : 1;
+    return aHas - bHas;
+  });
+ 
+  const cards = orderedStages.map(st=>{
     const entries = [...(counts[st.id]||[])].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
     const n = entries.length;
     let dragging, draggingMsg;
@@ -83,14 +92,14 @@ function renderStagesTab(){
       </div>
     `;
   }).join('');
-
+ 
   return `
     <div class="section-title">مراحل العلاج</div>
     <div class="placeholder" style="text-align:right;padding:10px;margin-bottom:14px;">العداد بيتحدث تلقائيًا من تسجيلات المتابعة الشهرية — ممكن كمان تعدّل تاريخ أي تسجيل هنا مباشرة أو تضيف تسجيل قديم/جديد</div>
     <div class="stage-grid">${cards}</div>
   `;
 }
-
+ 
 async function addStageOccurrence(stageId){
   const file = state.currentPatientFile;
   if(!file.monthlyLog) file.monthlyLog = [];
@@ -100,7 +109,7 @@ async function addStageOccurrence(stageId){
   toast('اتضاف تسجيل — عدّل تاريخه لو محتاج شهر قبل كده');
   render();
 }
-
+ 
 async function removeStageTag(entryId, stageId){
   const file = state.currentPatientFile;
   const e = (file.monthlyLog||[]).find(x=>x.id===entryId);
@@ -109,7 +118,7 @@ async function removeStageTag(entryId, stageId){
   await savePatientFile(state.currentPatientId, stripHelperFields(file));
   render();
 }
-
+ 
 function attachStagesHandlers(){
   document.querySelectorAll('.stage-date-input').forEach(el=>{
     el.onchange = async () => {
@@ -124,13 +133,13 @@ function attachStagesHandlers(){
     el.onclick = () => addStageOccurrence(el.dataset.stage);
   });
 }
-
+ 
 // ============ BRACKET MAP TAB ============
 const FDI_TEETH_ROWS = {
   upper: ['18','17','16','15','14','13','12','11','21','22','23','24','25','26','27','28'],
   lower: ['48','47','46','45','44','43','42','41','31','32','33','34','35','36','37','38']
 };
-
+ 
 function ensureBracketMap(file){
   if(!file.bracketMap) file.bracketMap = { teeth: {} };
   if(!file.bracketMap.teeth) file.bracketMap.teeth = {};
@@ -139,7 +148,7 @@ function ensureBracketMap(file){
   });
   return file.bracketMap;
 }
-
+ 
 function renderToothBox(num, data){
   const broken = data.status === 'broken';
   const count = data.breaks.length;
@@ -151,7 +160,7 @@ function renderToothBox(num, data){
     </div>
   `;
 }
-
+ 
 function renderBracketsTab(){
   const file = state.currentPatientFile;
   const bm = ensureBracketMap(file);
@@ -160,16 +169,16 @@ function renderBracketsTab(){
   const brokenNow = allNums.filter(n=>teeth[n].status==='broken').length;
   const totalBreaks = allNums.reduce((s,n)=>s+teeth[n].breaks.length,0);
   const repeatTeeth = allNums.filter(n=>teeth[n].breaks.length>=2);
-
+ 
   const upperRow = FDI_TEETH_ROWS.upper.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderToothBox(n, teeth[n])).join('');
   const lowerRow = FDI_TEETH_ROWS.lower.map((n,i)=> (i===8?'<div class="quad-gap"></div>':'') + renderToothBox(n, teeth[n])).join('');
-
+ 
   let logRows = [];
   allNums.forEach(n=>{
     teeth[n].breaks.forEach(b=>{ logRows.push({tooth:n, ...b}); });
   });
   logRows.sort((a,b)=> (b.date||'').localeCompare(a.date||''));
-
+ 
   const logHtml = logRows.length ? `
     <table>
       <thead><tr><th>التاريخ</th><th>السن</th><th>الرسوم</th><th></th></tr></thead>
@@ -185,7 +194,7 @@ function renderBracketsTab(){
       </tbody>
     </table>
   ` : `<div class="placeholder" style="margin-top:10px;">لسه مفيش كسور مسجلة</div>`;
-
+ 
   return `
     <div class="bracket-summary">
       <div class="bracket-stat"><div class="num">${brokenNow}</div><div class="lbl">مكسور حاليًا</div></div>
@@ -208,7 +217,7 @@ function renderBracketsTab(){
     </div>
   `;
 }
-
+ 
 async function toggleTooth(num){
   const file = state.currentPatientFile;
   const bm = ensureBracketMap(file);
@@ -234,7 +243,7 @@ async function toggleTooth(num){
   }
   render();
 }
-
+ 
 async function deleteBreakEntry(tooth, breakId){
   if(!(await confirmModal('حذف سجل الكسر ده؟ ده هيشيل معاه أي رسوم مرتبطة في الحسابات، ولو الكسر ده كان جاي من "rebonding" في المتابعة الشهرية هيرجع الكمية المخصومة للمخزن تلقائي.', {danger:true}))) return;
   const file = state.currentPatientFile;
@@ -243,7 +252,7 @@ async function deleteBreakEntry(tooth, breakId){
   const idx = t.breaks.findIndex(b=>b.id===breakId);
   if(idx>-1) t.breaks.splice(idx,1);
   if(file.financeExtras) file.financeExtras = file.financeExtras.filter(e=>e.id !== breakId);
-
+ 
   // if this break was created via a "rebonding" keyword match in Monthly Follow-up, undo that side too:
   // restore the stock it deducted and remove the tag from that entry's materials-used list
   let inventoryChanged = false;
@@ -257,12 +266,12 @@ async function deleteBreakEntry(tooth, breakId){
     }
   });
   if(inventoryChanged) await saveInventory();
-
+ 
   await savePatientFile(state.currentPatientId, stripHelperFields(file));
   toast('اتحذف السجل');
   render();
 }
-
+ 
 function attachBracketsHandlers(){
   document.querySelectorAll('.tooth').forEach(el=>{
     el.onclick = () => toggleTooth(el.dataset.tooth);
@@ -271,4 +280,4 @@ function attachBracketsHandlers(){
     el.onclick = (e) => { e.stopPropagation(); deleteBreakEntry(el.dataset.tooth, el.dataset.delBreak); };
   });
 }
-
+ 
