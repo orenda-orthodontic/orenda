@@ -19,13 +19,13 @@ const PHOTO_RECORDS_SLOTS = [
   {id:'panorama', label:'Panorama'}
 ];
 const PHOTO_STORAGE_BUCKET = 'patient-photos';
-
+ 
 function emptyPhotoSection(withRecords){
   const s = {extraoral:{}, intraoral:{}};
   if(withRecords) s.records = {};
   return s;
 }
-
+ 
 function ensurePhotos(file){
   if(!file.photos) file.photos = { before: emptyPhotoSection(true), after: emptyPhotoSection(true), during: [] };
   if(!file.photos.before) file.photos.before = emptyPhotoSection(true);
@@ -39,7 +39,7 @@ function ensurePhotos(file){
   if(!file.photos.during) file.photos.during = [];
   return file.photos;
 }
-
+ 
 // resizes + re-encodes the image client-side before upload so the free storage quota goes further
 async function compressImageFile(file, maxDim, quality){
   maxDim = maxDim || 1400;
@@ -67,7 +67,7 @@ async function compressImageFile(file, maxDim, quality){
     URL.revokeObjectURL(imgUrl);
   }
 }
-
+ 
 async function uploadPhotoToStorage(blob, path){
   await ensureFreshSession();
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${PHOTO_STORAGE_BUCKET}/${path}`, {
@@ -83,7 +83,7 @@ async function uploadPhotoToStorage(blob, path){
   // which happens lazily via refreshPhotoUrlCache() whenever the Photos tab is rendered
   return `${SUPABASE_URL}/storage/v1/object/public/${PHOTO_STORAGE_BUCKET}/${path}`;
 }
-
+ 
 // signs a batch of storage paths at once (one request instead of one per photo) and caches
 // the temporary signed URLs in state.photoUrlCache, keyed by path; signed URLs expire after
 // PHOTO_SIGNED_URL_TTL seconds so a copied/leaked link stops working on its own
@@ -112,7 +112,7 @@ async function refreshPhotoUrlCache(paths){
     console.error('refreshPhotoUrlCache failed', e);
   }
 }
-
+ 
 // reads the cached signed URL for a stored photo object; falls back to the old .url field
 // (harmless if the bucket is still public, dead if it's private — either way not a crash)
 function resolvePhotoUrl(photoObj){
@@ -120,7 +120,7 @@ function resolvePhotoUrl(photoObj){
   const cached = photoObj.path && state.photoUrlCache[photoObj.path];
   return (cached && cached.url) || photoObj.url || '';
 }
-
+ 
 function collectPhotoPaths(photos){
   const paths = [];
   const grab = (obj) => { if(obj) Object.values(obj).forEach(s => { if(s && s.path) paths.push(s.path); }); };
@@ -129,7 +129,7 @@ function collectPhotoPaths(photos){
   (photos.during || []).forEach(v => { grab(v.extraoral); grab(v.intraoral); });
   return paths;
 }
-
+ 
 async function deletePhotoFromStorage(path){
   if(!path) return;
   await ensureFreshSession();
@@ -137,12 +137,12 @@ async function deletePhotoFromStorage(path){
     await fetch(`${SUPABASE_URL}/storage/v1/object/${PHOTO_STORAGE_BUCKET}/${path}`, { method: 'DELETE', headers: supabaseHeaders() });
   }catch(e){ console.error('delete photo failed', e); }
 }
-
+ 
 function photoSlotPath(patientId, section, visitId, category, slotId){
   const base = visitId ? `${patientId}/during/${visitId}` : `${patientId}/${section}`;
   return `${base}/${category}-${slotId}-${uid()}.jpg`;
 }
-
+ 
 function getSlotsObj(section, visitId, category){
   const photos = ensurePhotos(state.currentPatientFile);
   if(section === 'before') return photos.before[category];
@@ -150,7 +150,7 @@ function getSlotsObj(section, visitId, category){
   const v = photos.during.find(x=>x.id===visitId);
   return v ? v[category] : null;
 }
-
+ 
 const PHOTO_SLOT_ORDER = [
   {category:'extraoral', id:'frontalRest'},
   {category:'extraoral', id:'frontalSmile'},
@@ -171,7 +171,7 @@ const PHOTO_SLOT_ORDER_WITH_RECORDS = [
 function photoSlotOrderFor(section){
   return (section === 'before' || section === 'after') ? PHOTO_SLOT_ORDER_WITH_RECORDS : PHOTO_SLOT_ORDER;
 }
-
+ 
 // does the actual compress+upload+save for one slot, without toasting/rendering —
 // used both by single-slot drop and by the batch multi-drop below
 async function uploadOnePhotoSlot(section, visitId, category, slotId, file){
@@ -186,7 +186,7 @@ async function uploadOnePhotoSlot(section, visitId, category, slotId, file){
   await savePatientFile(state.currentPatientId, stripHelperFields(pFile));
   if(old && old.path) deletePhotoFromStorage(old.path);
 }
-
+ 
 async function handlePhotoDrop(section, visitId, category, slotId, file){
   if(!file || !file.type || file.type.indexOf('image/') !== 0){ toast('لازم تختار صورة'); return; }
   toast('بيترفع...');
@@ -199,7 +199,7 @@ async function handlePhotoDrop(section, visitId, category, slotId, file){
     toast('فشل رفع الصورة — تأكد إن النت شغال');
   }
 }
-
+ 
 // drop several photos at once onto the batch zone — fills the empty slots in the fixed
 // order (Frontal Rest, Frontal Smile, Profile, Frontal, Occlusal Upper, Occlusal Lower, Right, Left),
 // skipping slots that already have a photo so you don't lose good shots while adding missing ones
@@ -216,7 +216,7 @@ async function handleBatchPhotoDrop(section, visitId, fileList){
   const emptySlots = order.filter(sl => !objByCat[sl.category][sl.id]);
   if(!emptySlots.length){ toast('كل الخانات مليانة بالفعل — امسح خانة الأول لو عايز تستبدلها'); return; }
   const toAssign = files.slice(0, emptySlots.length);
-
+ 
   toast('بيترفع الصور...');
   try{
     for(let i=0;i<toAssign.length;i++){
@@ -232,7 +232,7 @@ async function handleBatchPhotoDrop(section, visitId, fileList){
     render();
   }
 }
-
+ 
 // swaps (or moves) two photos between slots — used for fixing a wrong auto-assignment by drag & drop
 async function swapPhotoSlots(fromSection, fromVisit, fromCategory, fromSlot, toSection, toVisit, toCategory, toSlot){
   if(fromSection !== toSection || fromVisit !== toVisit){ toast('السحب متاح جوه نفس الزيارة/القسم بس'); return; }
@@ -248,7 +248,7 @@ async function swapPhotoSlots(fromSection, fromVisit, fromCategory, fromSlot, to
   await savePatientFile(state.currentPatientId, stripHelperFields(pFile));
   render();
 }
-
+ 
 async function deletePhotoSlot(section, visitId, category, slotId){
   if(!(await confirmModal('حذف الصورة دي؟', {danger:true}))) return;
   const pFile = state.currentPatientFile;
@@ -262,7 +262,7 @@ async function deletePhotoSlot(section, visitId, category, slotId){
   toast('اتمسحت الصورة');
   render();
 }
-
+ 
 async function addDuringVisit(){
   const pFile = state.currentPatientFile;
   const photos = ensurePhotos(pFile);
@@ -275,7 +275,7 @@ async function addDuringVisit(){
   state.photosActiveVisitId = visit.id;
   render();
 }
-
+ 
 async function deleteDuringVisit(visitId){
   if(!(await confirmModal('حذف الزيارة دي بكل صورها؟', {danger:true}))) return;
   const pFile = state.currentPatientFile;
@@ -290,7 +290,7 @@ async function deleteDuringVisit(visitId){
   toast('اتمسحت الزيارة');
   render();
 }
-
+ 
 function photoSlotHtml(section, visitId, category, slot, slotsObj){
   const s = slotsObj ? slotsObj[slot.id] : null;
   const dropId = `${section}_${visitId||'main'}_${category}_${slot.id}`;
@@ -308,7 +308,7 @@ function photoSlotHtml(section, visitId, category, slot, slotsObj){
     </div>
   `;
 }
-
+ 
 function photoSlotsGridHtml(section, visitId, slotsObj){
   const batchId = `${section}_${visitId||'main'}`;
   const withRecords = (section === 'before' || section === 'after');
@@ -334,7 +334,7 @@ function photoSlotsGridHtml(section, visitId, slotsObj){
     <div class="placeholder" style="padding:8px;margin-top:4px;font-size:12px;">ملحوظة: لو صورة وقعت في خانة غلط، اسحبها وحطها في الخانة الصح — هيتبادلوا مكان بعض تلقائي.</div>
   `;
 }
-
+ 
 function renderPhotosTab(){
   const file = state.currentPatientFile;
   const photos = ensurePhotos(file);
@@ -342,7 +342,7 @@ function renderPhotosTab(){
   const during = photos.during || [];
   if(!state.photosActiveVisitId && during.length) state.photosActiveVisitId = during[during.length-1].id;
   const activeVisit = during.find(v=>v.id===state.photosActiveVisitId);
-
+ 
   const allSlots = [
     ...PHOTO_EXTRAORAL_SLOTS.map(s=>({...s,category:'extraoral'})),
     ...PHOTO_INTRAORAL_SLOTS.map(s=>({...s,category:'intraoral'})),
@@ -360,7 +360,7 @@ function renderPhotosTab(){
     ? (photos.after[cmpCategory] ? photos.after[cmpCategory][cmpSlotId] : null)
     : (latestDuring ? (latestDuring[cmpCategory] ? latestDuring[cmpCategory][cmpSlotId] : null) : null);
   const catLabel = {extraoral:'Extraoral', intraoral:'Intraoral', records:'Records'};
-
+ 
   return `
     <div class="photo-subtabs">
       <button class="photo-subtab ${sub==='before'?'active':''}" data-photo-sub="before">قبل</button>
@@ -368,10 +368,10 @@ function renderPhotosTab(){
       <button class="photo-subtab ${sub==='after'?'active':''}" data-photo-sub="after">بعد</button>
       <button class="photo-subtab ${sub==='compare'?'active':''}" data-photo-sub="compare">مقارنة</button>
     </div>
-
+ 
     ${sub === 'before' ? photoSlotsGridHtml('before', null, photos.before) : ''}
     ${sub === 'after' ? photoSlotsGridHtml('after', null, photos.after) : ''}
-
+ 
     ${sub === 'during' ? `
       <div class="photo-timeline">
         ${during.length ? during.map(v => `<button class="photo-timeline-pt ${v.id===state.photosActiveVisitId?'active':''}" data-visit-pt="${v.id}">${escapeHtml(v.date)}</button>`).join('') : `<div class="placeholder" style="padding:8px;">مفيش زيارات لسه — دوس "+ زيارة جديدة"</div>`}
@@ -385,7 +385,7 @@ function renderPhotosTab(){
         ${photoSlotsGridHtml('during', activeVisit.id, activeVisit)}
       ` : ''}
     ` : ''}
-
+ 
     ${sub === 'compare' ? `
       <div class="field" style="margin-bottom:14px;">
         <label>اختار الخانة</label>
@@ -406,13 +406,13 @@ function renderPhotosTab(){
     ` : ''}
   `;
 }
-
+ 
 // ============ PHOTO EDITOR (rotate + crop, re-uploads over the same storage path) ============
 // Rotation is "baked" into a full-resolution offscreen canvas immediately on each rotate click,
 // so the crop rectangle (drawn on the smaller on-screen preview) only ever needs a simple scale
 // factor to map back to full-res coordinates — no combined rotate+crop math to get wrong.
 const PHOTO_EDITOR_MAX_DISPLAY = 480;
-
+ 
 function rotateCanvas90(srcCanvas){
   const out = document.createElement('canvas');
   out.width = srcCanvas.height;
@@ -423,13 +423,13 @@ function rotateCanvas90(srcCanvas){
   ctx.drawImage(srcCanvas, -srcCanvas.width/2, -srcCanvas.height/2);
   return out;
 }
-
+ 
 async function openPhotoEditorModal(section, visitId, category, slotId){
   const slotsObj = getSlotsObj(section, visitId, category);
   const s = slotsObj ? slotsObj[slotId] : null;
   if(!s){ toast('مفيش صورة هنا'); return; }
   const srcUrl = resolvePhotoUrl(s);
-
+ 
   toast('بيحمّل الصورة...');
   let img;
   try{
@@ -445,12 +445,12 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
     toast('تعذر تحميل الصورة للتعديل');
     return;
   }
-
+ 
   let working = document.createElement('canvas');
   working.width = img.naturalWidth;
   working.height = img.naturalHeight;
   working.getContext('2d').drawImage(img, 0, 0);
-
+ 
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
   bg.innerHTML = `
@@ -472,12 +472,12 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
     </div>
   `;
   document.body.appendChild(bg);
-
+ 
   const canvas = document.getElementById('photoEditCanvas');
   const ctx = canvas.getContext('2d');
   let cropRect = null; // in DISPLAY canvas coordinates
   let scale = 1;
-
+ 
   function redraw(){
     scale = Math.min(1, PHOTO_EDITOR_MAX_DISPLAY / Math.max(working.width, working.height));
     canvas.width = Math.round(working.width * scale);
@@ -495,7 +495,7 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
     }
   }
   redraw();
-
+ 
   let dragStart = null;
   const getPos = (e) => {
     const r = canvas.getBoundingClientRect();
@@ -525,7 +525,7 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
   canvas.addEventListener('touchstart', onDown, {passive:false});
   canvas.addEventListener('touchmove', onMove, {passive:false});
   canvas.addEventListener('touchend', onUp);
-
+ 
   const cleanup = () => {
     window.removeEventListener('mouseup', onUp);
     bg.remove();
@@ -543,7 +543,7 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
     redraw();
   };
   document.getElementById('photoEditResetCrop').onclick = () => { cropRect = null; redraw(); };
-
+ 
   document.getElementById('photoEditSaveBtn').onclick = async () => {
     let finalCanvas = working;
     if(cropRect && cropRect.w > 0 && cropRect.h > 0){
@@ -570,15 +570,81 @@ async function openPhotoEditorModal(section, visitId, category, slotId){
     }
   };
 }
-
-function openLightbox(url){
+ 
+// gallery lightbox: shows one photo at a time out of `urls`, starting at `startIndex`.
+// Supports: click-arrow, keyboard left/right, and touch swipe — so you can flip through
+// every photo currently visible in the open tab (before/during/after/compare) without
+// closing and reopening the viewer for each one.
+function openLightbox(urls, startIndex){
+  urls = (urls || []).filter(Boolean);
+  if(!urls.length) return;
+  let idx = ((startIndex||0) % urls.length + urls.length) % urls.length;
+ 
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<img src="${url}" style="max-width:92vw;max-height:92vh;border-radius:8px;">`;
-  bg.onclick = () => bg.remove();
+  bg.innerHTML = `
+    <div class="lightbox-wrap" style="position:relative;max-width:92vw;max-height:92vh;touch-action:pan-y;">
+      <img id="lightboxImg" src="${urls[idx]}" style="max-width:92vw;max-height:92vh;border-radius:8px;display:block;user-select:none;-webkit-user-drag:none;">
+      ${urls.length > 1 ? `
+        <button id="lightboxPrevBtn" style="position:absolute;top:50%;left:10px;transform:translateY(-50%);background:rgba(0,0,0,.45);color:#fff;border:none;width:42px;height:42px;border-radius:50%;font-size:24px;line-height:1;cursor:pointer;">‹</button>
+        <button id="lightboxNextBtn" style="position:absolute;top:50%;right:10px;transform:translateY(-50%);background:rgba(0,0,0,.45);color:#fff;border:none;width:42px;height:42px;border-radius:50%;font-size:24px;line-height:1;cursor:pointer;">›</button>
+        <div id="lightboxCounter" style="position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.5);color:#fff;padding:3px 10px;border-radius:14px;font-size:12px;">${idx+1} / ${urls.length}</div>
+      ` : ''}
+    </div>
+  `;
   document.body.appendChild(bg);
+ 
+  const imgEl = document.getElementById('lightboxImg');
+  const counterEl = document.getElementById('lightboxCounter');
+  function show(newIdx){
+    idx = ((newIdx % urls.length) + urls.length) % urls.length;
+    imgEl.src = urls[idx];
+    if(counterEl) counterEl.textContent = `${idx+1} / ${urls.length}`;
+  }
+ 
+  function cleanup(){
+    document.removeEventListener('keydown', onKey);
+    bg.remove();
+  }
+  function onKey(e){
+    if(e.key === 'Escape') cleanup();
+    else if(e.key === 'ArrowLeft') show(idx+1);
+    else if(e.key === 'ArrowRight') show(idx-1);
+  }
+  document.addEventListener('keydown', onKey);
+ 
+  bg.onclick = (e) => { if(e.target === bg) cleanup(); };
+  const prevBtn = document.getElementById('lightboxPrevBtn');
+  const nextBtn = document.getElementById('lightboxNextBtn');
+  if(prevBtn) prevBtn.onclick = (e) => { e.stopPropagation(); show(idx-1); };
+  if(nextBtn) nextBtn.onclick = (e) => { e.stopPropagation(); show(idx+1); };
+ 
+  // swipe: left = next photo, right = previous photo
+  let touchStartX = null, touchStartY = null;
+  bg.addEventListener('touchstart', (e) => {
+    if(e.touches.length !== 1) return;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  }, {passive:true});
+  bg.addEventListener('touchend', (e) => {
+    if(touchStartX === null) return;
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    touchStartX = null; touchStartY = null;
+    if(Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return; // not a real horizontal swipe
+    show(dx < 0 ? idx+1 : idx-1);
+  }, {passive:true});
 }
-
+ 
+// collects the urls of every photo thumbnail currently rendered in the open tab (in DOM order)
+// and opens the lightbox positioned at whichever one was clicked, so swipe/arrows can reach them all
+function openLightboxFromClick(clickedEl){
+  const all = Array.from(document.querySelectorAll('.photo-slot-thumb, .photo-compare-img'));
+  const urls = all.map(el => el.dataset.lightbox || el.src);
+  const idx = all.indexOf(clickedEl);
+  openLightbox(urls, idx < 0 ? 0 : idx);
+}
+ 
 function attachPhotosHandlers(){
   document.querySelectorAll('[data-photo-sub]').forEach(el=>{
     el.onclick = () => { state.photosActiveSection = el.dataset.photoSub; render(); };
@@ -608,7 +674,7 @@ function attachPhotosHandlers(){
     };
   });
   document.querySelectorAll('.photo-slot-thumb, .photo-compare-img').forEach(el=>{
-    el.onclick = (e) => { e.stopPropagation(); openLightbox(el.dataset.lightbox || el.src); };
+    el.onclick = (e) => { e.stopPropagation(); openLightboxFromClick(el); };
   });
   document.querySelectorAll('[data-photo-slot]').forEach(wrap=>{
     const section = wrap.dataset.section, visit = wrap.dataset.visit, category = wrap.dataset.category, slot = wrap.dataset.slot;
@@ -652,4 +718,5 @@ function attachPhotosHandlers(){
     };
   });
 }
-
+ 
+ 
