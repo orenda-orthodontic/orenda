@@ -10,7 +10,7 @@ const DEROTATION_RE = /de-?\s*rotation/i;
 const MIDLINE_RE = /midline(\s*correction)?/i;
 const UPPER_WORD_RE = /\bupper\b/i;
 const LOWER_WORD_RE = /\blower\b/i;
-
+ 
 // same idea as extractBondingLine() in bonding-newcase.js — isolates just the line containing the
 // keyword, so an unrelated "upper"/"lower" typed elsewhere in the note isn't picked up by mistake.
 function extractKeywordLine(text, keywordRe){
@@ -22,12 +22,22 @@ function extractKeywordLine(text, keywordRe){
   const end = afterIdx === -1 ? text.length : afterIdx;
   return text.slice(start, end);
 }
-
+ 
+// same as extractKeywordLine but returns EVERY line that mentions the keyword, not just the
+// first — needed for keywords (Incisors Retraction / Midline) that can be typed once per arch
+// on separate lines in the same monthly note (e.g. "upper incisors retraction" on one line and
+// "lower incisors retraction" on another), so each arch's "upper"/"lower" word is picked up
+// from its own line instead of only ever looking at the first matching line.
+function extractAllKeywordLines(text, keywordRe){
+  if(!text) return [];
+  return text.split('\n').filter(line => keywordRe.test(line));
+}
+ 
 function addStageTag(e, stageId){
   if(!e.stages) e.stages = [];
   if(!e.stages.includes(stageId)) e.stages.push(stageId);
 }
-
+ 
 // ---- per-tooth occurrence log (canine retraction + de-rotation), same spirit as bracketMap.teeth[n].breaks
 function stageToothLogArr(file, stageId){
   if(!file.stageTeeth) file.stageTeeth = {};
@@ -50,7 +60,7 @@ function renderStageToothBreakdown(file, stageId){
     </div>
   `;
 }
-
+ 
 // ---- tiny tooth-picker modal (multi-select), visually reusing the .tooth boxes from the bracket map
 function pickTeethModal(title, subtitle, teethNums){
   return new Promise(resolve=>{
@@ -87,13 +97,13 @@ function pickTeethModal(title, subtitle, teethNums){
     bg.onclick = (e) => { if(e.target === bg) finish(null); };
   });
 }
-
+ 
 // mirrored convention (same as the rest of the app, via FDI_TEETH_ROWS/fdiToPalmer): quadrants
 // 1/2 (upper row) vs 3/4 (lower row) — so e.g. '13' displays as UL3, '43' as LL3, matching the
 // same notation used everywhere else in the bracket/reveal charts.
 const CANINE_TEETH = ['13','23','33','43'];
 function isUpperTooth(fdi){ return FDI_TEETH_ROWS.upper.includes(String(fdi)); }
-
+ 
 async function handleCanineRetraction(file, e, entryId){
   const picked = await pickTeethModal('Canine Retraction', 'اختار أي ناب اتسحب الشهر ده (تقدر تختار أكتر من واحد)', CANINE_TEETH);
   if(!picked) return; // cancelled — will ask again on next edit
@@ -107,11 +117,14 @@ async function handleCanineRetraction(file, e, entryId){
   toast('اتسجلت Canine Retraction في مراحل العلاج');
   render();
 }
-
+ 
 async function handleIncisorsRetraction(file, e, entryId, text){
-  const line = extractKeywordLine(text, INCISORS_RETRACTION_RE);
-  const upper = UPPER_WORD_RE.test(line);
-  const lower = LOWER_WORD_RE.test(line);
+  const lines = extractAllKeywordLines(text, INCISORS_RETRACTION_RE);
+  let upper = false, lower = false;
+  lines.forEach(line=>{
+    if(UPPER_WORD_RE.test(line)) upper = true;
+    if(LOWER_WORD_RE.test(line)) lower = true;
+  });
   if(!upper && !lower) return; // not enough info yet — wait for "upper"/"lower" to be added
   if(upper) addStageTag(e, 'incisors_retraction_upper');
   if(lower) addStageTag(e, 'incisors_retraction_lower');
@@ -120,7 +133,7 @@ async function handleIncisorsRetraction(file, e, entryId, text){
   toast('اتسجلت Incisors Retraction في مراحل العلاج');
   render();
 }
-
+ 
 async function handleDistalization(file, e, entryId){
   const pick = await askChoice('Distalization', 'يمين ولا شمال ولا الاتنين؟', [
     { value:'right', label:'يمين (Right)' },
@@ -134,7 +147,7 @@ async function handleDistalization(file, e, entryId){
   toast('اتسجلت Distalization في مراحل العلاج');
   render();
 }
-
+ 
 async function handleIntrusion(file, e, entryId){
   const pick = await askChoice('Intrusion', 'فوق ولا تحت؟', [
     { value:'upper', label:'فوق (Upper)' },
@@ -147,7 +160,7 @@ async function handleIntrusion(file, e, entryId){
   toast('اتسجلت Intrusion في مراحل العلاج');
   render();
 }
-
+ 
 async function handleDerotation(file, e, entryId){
   const allTeeth = [...FDI_TEETH_ROWS.upper, ...FDI_TEETH_ROWS.lower];
   const picked = await pickTeethModal('De-rotation', 'اختار أي سن اترتّب الشهر ده (تقدر تختار أكتر من واحد)', allTeeth);
@@ -159,11 +172,14 @@ async function handleDerotation(file, e, entryId){
   toast('اتسجلت De-rotation في مراحل العلاج');
   render();
 }
-
+ 
 async function handleMidline(file, e, entryId, text){
-  const line = extractKeywordLine(text, MIDLINE_RE);
-  const upper = UPPER_WORD_RE.test(line);
-  const lower = LOWER_WORD_RE.test(line);
+  const lines = extractAllKeywordLines(text, MIDLINE_RE);
+  let upper = false, lower = false;
+  lines.forEach(line=>{
+    if(UPPER_WORD_RE.test(line)) upper = true;
+    if(LOWER_WORD_RE.test(line)) lower = true;
+  });
   if(!upper && !lower) return;
   if(upper) addStageTag(e, 'midline_upper');
   if(lower) addStageTag(e, 'midline_lower');
@@ -172,13 +188,13 @@ async function handleMidline(file, e, entryId, text){
   toast('اتسجلت Midline Correction في مراحل العلاج');
   render();
 }
-
+ 
 async function scanAdvancedStages(entryId, text){
   if(!text) return;
   const file = state.currentPatientFile;
   const e = (file.monthlyLog||[]).find(x=>x.id===entryId);
   if(!e) return;
-
+ 
   if(CANINE_RETRACTION_RE.test(text) && !e.canineRetractionHandled){
     await handleCanineRetraction(file, e, entryId);
   }
@@ -198,3 +214,4 @@ async function scanAdvancedStages(entryId, text){
     await handleMidline(file, e, entryId, text);
   }
 }
+ 
