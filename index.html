@@ -395,6 +395,58 @@
   .overview-row .ov-lbl{color:var(--muted);flex-shrink:0;}
   .overview-row .ov-val{text-align:left;font-weight:600;}
   .overview-row .ov-val.ov-alert{color:var(--red);}
+
+  /* ===== Patient File V2 — clinical dashboard layer ===== */
+  .patient-backbar{margin-bottom:8px;}
+  .patient-backbar .breadcrumb{margin-bottom:0;font-size:12.5px;}
+  .patient-hero{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:14px;box-shadow:0 5px 20px rgba(42,32,24,.04);}
+  .patient-hero-main{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;}
+  .patient-identity{display:flex;align-items:center;gap:12px;min-width:0;}
+  .patient-avatar{width:48px;height:48px;border-radius:14px;background:var(--panel2);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;flex:none;border:1px solid var(--border);}
+  .patient-title-wrap{min-width:0;}
+  .patient-title-line{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+  .patient-title-line h1{font-family:'Fraunces',Georgia,serif;font-size:24px;line-height:1.2;margin:0;font-weight:600;}
+  .case-status{display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:800;white-space:nowrap;}
+  .case-status.active{background:rgba(46,157,111,.12);color:var(--green);}
+  .case-status.closed{background:rgba(140,122,104,.13);color:var(--muted);}
+  .patient-meta{font-size:12px;color:var(--muted);margin-top:4px;}
+  .patient-phone{display:inline-flex;margin-top:5px;color:var(--green);font-size:12px;font-weight:700;text-decoration:none;}
+  .patient-hero-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end;}
+  .patient-alerts{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0 0;}
+  .case-alert{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-size:11.5px;font-weight:700;border:1px solid transparent;}
+  .case-alert.warning{background:rgba(185,134,15,.10);border-color:rgba(185,134,15,.28);color:#8a6d1f;}
+  .case-alert.danger{background:rgba(201,79,60,.10);border-color:rgba(201,79,60,.28);color:var(--red);}
+  .patient-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:16px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+  .patient-metric{padding:12px 14px;min-width:0;border-inline-start:1px solid var(--border);}
+  .patient-metric:first-child{border-inline-start:none;}
+  .patient-metric span{display:block;font-size:10.5px;color:var(--muted);margin-bottom:4px;}
+  .patient-metric b{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .patient-metric .metric-alert{color:var(--red);}
+  .patient-metric .metric-good{color:var(--green);}
+  .patient-quick-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;}
+  .quick-action{display:flex;align-items:center;justify-content:flex-start;gap:9px;background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:9px 11px;border-radius:11px;text-align:right;}
+  .quick-action:hover{background:#f1dfcf;border-color:var(--accent);color:var(--text);}
+  .quick-action.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .quick-action.primary:hover{background:var(--accent2);}
+  .quick-action > span{font-size:19px;font-weight:400;line-height:1;}
+  .quick-action b,.quick-action small{display:block;text-align:right;}
+  .quick-action b{font-size:12px;}
+  .quick-action small{font-size:10px;opacity:.72;margin-top:2px;font-weight:500;}
+  .quick-action.primary small{opacity:.82;}
+  @media (min-width:900px){
+    .app{max-width:1180px;}
+  }
+  @media (max-width:720px){
+    .patient-hero{padding:15px;border-radius:14px;}
+    .patient-hero-main{display:block;}
+    .patient-hero-actions{justify-content:flex-start;margin-top:12px;}
+    .patient-metrics{grid-template-columns:repeat(2,1fr);}
+    .patient-metric:nth-child(3){border-inline-start:none;border-top:1px solid var(--border);}
+    .patient-metric:nth-child(4){border-top:1px solid var(--border);}
+    .patient-quick-actions{grid-template-columns:repeat(2,1fr);}
+    .patient-title-line h1{font-size:21px;}
+  }
+
 </style>
 </head>
 <body>
