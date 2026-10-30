@@ -5,7 +5,7 @@
 // Anthropic / الخطوط) مش بتعدّي من هنا خالص، فمفيش بيانات مرضى أو صور بتتخزن في الكاش.
 // لما تغيّر قايمة الملفات أو عايز تفرض تنضيف كاش قديم، زوّد رقم CACHE_VERSION.
 
-const CACHE_VERSION = 'orenda-v5';
+const CACHE_VERSION = 'orenda-v6';
 const APP_SHELL = [
   "./",
   "index.html",
@@ -53,6 +53,7 @@ const APP_SHELL = [
   "js/diagnosis-tab.js",
   "js/webceph-import.js",
   "js/finance-tab.js",
+  "js/ui-polish.js",
   "js/main.js"
 ];
 
