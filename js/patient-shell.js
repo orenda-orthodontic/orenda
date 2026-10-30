@@ -1,0 +1,574 @@
+// patient-shell.js — الهيكل العام لملف المريض (تابات، هيدر)
+// ============ PATIENT VIEW (shell for future sections) ============
+function ensurePatientStyles(){
+  if(typeof document === 'undefined' || document.getElementById('patientProStyles')) return;
+  const st = document.createElement('style');
+  st.id = 'patientProStyles';
+  st.textContent = `
+    .ph-wrap{display:flex;align-items:flex-start;gap:16px;flex:1;min-width:0;}
+    .ph-avatar{flex:none;width:76px;height:76px;border-radius:50%;overflow:hidden;background:var(--panel2);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:700;cursor:pointer;border:2px solid var(--border);position:relative;}
+    .ph-avatar img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;}
+    .ph-avatar:hover{border-color:var(--accent);}
+    .ph-avatar .ph-cam{position:absolute;bottom:0;inset-inline:0;background:rgba(42,32,28,.55);color:#fff;font-size:10px;text-align:center;padding:2px 0;}
+    #app .tabs{top:0;gap:2px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;}
+    #app .tabs::-webkit-scrollbar{display:none;}
+    #app .tab{white-space:nowrap;padding:11px 14px;margin-left:0;font-size:14px;}
+    #app .tab.active{border-bottom-width:3px;font-weight:700;}
+    .overview-grid{gap:14px;}
+    .overview-card{background:var(--panel) !important;border-top:3px solid var(--accent) !important;border-radius:14px !important;}
+    .overview-card.ov-red{border-top-color:var(--red) !important;}
+    .overview-card-title{font-weight:700;}
+    .attention-card{background:#fdeee9;border:1px solid #f0cfc6;border-radius:14px;padding:12px 14px;margin-bottom:14px;}
+    .attention-card .at-title{font-size:13px;font-weight:700;color:#9a3a29;margin-bottom:8px;}
+    .attention-card .at-chips{display:flex;flex-wrap:wrap;gap:8px;}
+    .at-chip{background:#fff;color:#9a3a29;border:1px solid #f0cfc6;border-radius:20px;padding:4px 12px;font-size:12.5px;font-weight:600;cursor:pointer;}
+    .at-chip.warn{color:#7a5a00;border-color:#ecd9a0;}
+    @media (max-width:720px){ #app .tabs{top:80px;} .ph-avatar{width:60px;height:60px;font-size:24px;} }
+  `;
+  document.head.appendChild(st);
+}
+
+// ---- كارت "محتاج انتباهك": أهم اللي محتاج حركة في الحالة دي (الباقي من الفلوس، سن مكسور، ميعاد قريب...) —
+// بيتحسب من نفس بيانات الملف، ومبيظهرش خالص لو مفيش حاجة.
+function patientAttentionItems(file, clinic, missedMonths){
+  const items = [];
+  try{
+    const fin = computePatientFinance(file);
+    if(!file.accountSettled && fin.remainingCents > 0){
+      items.push({ tab: 'finance', text: 'الباقي ' + (typeof financeFmt === 'function' ? financeFmt(fin.remainingCents) : formatEgpFromCents(fin.remainingCents)) + ' جنيه' });
+    }
+    const unpaid = computeUnpaidMonths(file);
+    if(unpaid >= UNPAID_MONTHS_ALERT_THRESHOLD) items.push({ tab: 'finance', text: 'مدفعش من ' + unpaid + ' شهر', warn: true });
+  }catch(e){ /* بيانات حسابات ناقصة — نكمل من غيرها */ }
+  try{
+    const bm = ensureBracketMap(file);
+    const broken = [...FDI_TEETH_ROWS.upper, ...FDI_TEETH_ROWS.lower].filter(n => bm.teeth[n].status === 'broken');
+    if(broken.length) items.push({ tab: 'monthly', text: 'سن ' + broken.map(fdiToPalmer).join('، ') + ' مكسور' });
+  }catch(e){ /* ignore */ }
+  const next = patientNextClinicVisit(clinic);
+  if(next){
+    const dl = daysUntil(next);
+    if(dl !== null && dl >= 0 && dl <= 2) items.push({ tab: 'monthly', text: dl === 0 ? 'ميعاد العيادة النهاردة' : 'ميعاد العيادة بعد ' + dl + ' يوم', warn: true });
+  }
+  if(missedMonths >= MISSED_MONTHS_ALERT_THRESHOLD) items.push({ tab: 'monthly', text: 'مجاش من ' + missedMonths + ' شهر', warn: true });
+  return items;
+}
+function patientAttentionHtml(file){
+  const clinic = (state.clinics || []).find(c => c.id === state.currentClinicId);
+  const items = patientAttentionItems(file, clinic, computeMissedMonths(file));
+  if(!items.length) return '';
+  return `
+    <div class="attention-card">
+      <div class="at-title">محتاج انتباهك</div>
+      <div class="at-chips">${items.map(it => `<span class="at-chip${it.warn ? ' warn' : ''}" data-goto-tab="${it.tab}">${escapeHtml(it.text)}</span>`).join('')}</div>
+    </div>
+  `;
+}
+
+async function renderPatientView(){
+  const clinic = state.clinics.find(c=>c.id === state.currentClinicId);
+  const patient = state.patients.find(p=>p.id === state.currentPatientId);
+  if(!patient){
+    return `<div class="empty-state">المريض مش موجود</div>`;
+  }
+  if(!state.currentPatientFile || state.currentPatientFile._id !== patient.id){
+    state.currentPatientFile = await loadPatientFile(patient.id);
+    state.currentPatientFile._id = patient.id;
+  }
+  const file = state.currentPatientFile;
+  ensurePatientStyles();
+  // صورة المريض جنب اسمه = Frontal Rest (قبل) — نفس صورة قايمة المرضى؛ لو مفيش بيظهر أول حرف والضغط عليها بيفتح الصور
+  let phAvatarHtml = '';
+  {
+    const fr = (typeof ensurePhotos === 'function') ? (((ensurePhotos(file).before || {}).extraoral || {}).frontalRest) : null;
+    if(fr && (fr.path || fr.url)){
+      if(fr.path){ try{ await refreshPhotoUrlCache([fr.path]); }catch(e){ console.error('patient avatar sign failed', e); } }
+    }
+    const url = fr ? resolvePhotoUrl(fr) : '';
+    const letter = Array.from((patient.name || '').trim())[0] || '؟';
+    phAvatarHtml = `<div class="ph-avatar" data-goto-tab="photos" title="${url ? 'صور المريض' : 'ارفع صورة Frontal Rest (قبل) من تبويب الصور'}">${url ? `<img src="${escapeHtml(url)}" alt="">` : escapeHtml(letter) + '<span class="ph-cam">+ صورة</span>'}</div>`;
+  }
+
+  // لما ملف المريض يتفتح بنحدّث حالته في خريطة العيادة وتاريخ فكه في سجله — فالقايمة والترقيم
+  // (reconcileClinicNumbering) يشوفوا آخر حالة فورًا من غير ما يستنوا إعادة تحميل العيادة
+  if(state.clinicCaseStatus) state.clinicCaseStatus[patient.id] = file.caseStatus || 'active';
+  if((file.caseStatus || 'active') === 'debonded' && (patient.debondDate || null) !== (file.debondDate || null)){
+    patient.debondDate = file.debondDate || null;
+    setData('patients:' + state.currentClinicId, state.patients, { skipUndo: true }).catch(e => console.error('debond date sync failed', e));
+  }
+
+  // خريطة الفصوص بقت جوه شاشة المتابعة الشهرية — لو المستخدم كان واقف على التبويب القديم
+  // قبل التحديث (محفوظ في آخر مكان في localStorage) نوديه على المدموج بدل شاشة فاضية
+  if(state.activeTab === 'brackets') state.activeTab = 'monthly';
+
+  const tabs = [
+    {id:'overview', label:'نظرة عامة'},
+    {id:'diagnosis', label:'التشخيص والخطة'},
+    {id:'monthly', label:'المتابعة الشهرية والفصوص'},
+    {id:'photos', label:'الصور'},
+    {id:'stages', label:'مراحل العلاج'},
+    {id:'hygiene', label:'نظافة الأسنان'},
+    {id:'finance', label:'الحسابات'},
+  ];
+
+  const tabsHtml = tabs.map(t => `<div class="tab ${state.activeTab===t.id?'active':''}" data-tab="${t.id}">${t.label}</div>`).join('');
+
+  let bodyHtml = '';
+  if(state.activeTab === 'overview'){
+    // الكارت بتاع آخر صور "أثناء العلاج" محتاج signed URLs (الـ bucket private)
+    const ovVisit = latestDuringVisitWithPhotos(file);
+    if(ovVisit) await refreshPhotoUrlCache(collectVisitPhotoPaths(ovVisit));
+    bodyHtml = renderOverviewTab();
+  } else if(state.activeTab === 'diagnosis'){
+    bodyHtml = renderDiagnosisTab();
+  } else if(state.activeTab === 'monthly'){
+    bodyHtml = renderMonthlyTab();
+  } else if(state.activeTab === 'photos'){
+    await refreshPhotoUrlCache(collectPhotoPaths(ensurePhotos(file)));
+    bodyHtml = renderPhotosTab();
+  } else if(state.activeTab === 'stages'){
+    bodyHtml = renderStagesTab();
+  } else if(state.activeTab === 'hygiene'){
+    bodyHtml = renderHygieneTab();
+  } else if(state.activeTab === 'finance'){
+    bodyHtml = renderFinanceTab();
+  }
+
+  // ---- هيدر "٣ ثواني" — القيم دي كلها بتتحسب مرة واحدة هنا وبتتستخدم في الـ return تحت
+  const missedMonths = computeMissedMonths(file);
+  const caseStartDate = computeCaseStartDate(file);
+  const treatmentMonths = caseStartDate ? monthsSince(caseStartDate) : null;
+  const longDuration = treatmentMonths !== null && treatmentMonths >= CASE_LONG_DURATION_MONTHS;
+  const expectedMonths = parseInt(file.expectedDurationMonths, 10) || null;
+  const durationLabel = treatmentMonths === null ? null
+    : (expectedMonths ? `${treatmentMonths} / ${expectedMonths} شهر` : `${treatmentMonths} شهر`);
+  const lastVisitDate = patientLastVisitDate(file);
+  const nextClinicVisitDate = patientNextClinicVisit(clinic);
+  const headerTags = patientHeaderTags(file);
+  const isDebonded = (file.caseStatus || 'active') === 'debonded';
+
+  return `
+    <div class="breadcrumb">
+      <span class="crumb" id="crumbClinics2">العيادات</span>
+      <span class="sep">/</span>
+      <span class="crumb" id="crumbPatients">${escapeHtml(clinic ? clinic.name : '')}</span>
+      <span class="sep">/</span>
+      <span>${escapeHtml(patient.name)}</span>
+    </div>
+    <div class="card">
+      <div class="patient-header">
+        <div class="ph-wrap">
+        ${phAvatarHtml}
+        <div style="flex:1;min-width:0;">
+          <div class="pbig" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span>${escapeHtml(patient.name)}</span>
+            <span class="appt-badge" style="background:${isDebonded ? 'var(--panel2)' : 'rgba(46,157,111,.15)'};color:${isDebonded ? 'var(--muted)' : 'var(--green)'};border:1px solid ${isDebonded ? 'var(--border)' : 'var(--green)'};">
+              ${isDebonded ? '🔓 فكت' : '🟢 شغالة'}
+            </span>
+          </div>
+          <div class="psub">${isDebonded && patient.archiveNumber ? 'أرشيف رقم ' + escapeHtml(String(patient.archiveNumber)) : 'حالة رقم ' + escapeHtml(patient.number || '-')} — براكيت ${bracketSystemLabel(file.bracketSystem)}</div>
+
+          ${headerTags.length ? `
+            <div class="stage-tags" style="margin-top:6px;">
+              ${headerTags.map(t=>`<span class="stage-tag checked" style="cursor:default;">${escapeHtml(t)}</span>`).join('')}
+            </div>
+          ` : ''}
+
+          ${durationLabel ? `<div class="psub${longDuration?' stock-alert-blink':''}" style="margin-top:8px;${longDuration?'color:var(--red);':''}">⏱ مدة العلاج: ${escapeHtml(durationLabel)}${longDuration ? ' ⚠ أكتر من سنة ونص' : ''}</div>` : ''}
+          ${isDebonded && file.debondDate ? `<div class="psub" style="margin-top:4px;">تاريخ الفك: ${formatDateAr(file.debondDate)}</div>` : ''}
+
+          <div class="psub" style="margin-top:4px;">
+            ${lastVisitDate ? `آخر زيارة: ${formatDateAr(lastVisitDate)}` : 'لسه مفيش زيارة مسجلة'}${nextClinicVisitDate ? ` &nbsp;|&nbsp; ميعاد العيادة الجاي: ${formatDateAr(nextClinicVisitDate)}` : ''}
+          </div>
+
+          ${missedMonths >= MISSED_MONTHS_ALERT_THRESHOLD ? `<div class="psub" style="margin-top:6px;"><span class="appt-badge overdue stock-alert-blink">⚠ مجاش من ${missedMonths} شهر</span></div>` : ''}
+          ${(file.newCaseEvents||[]).length ? `<div class="psub" style="margin-top:4px;">🆕 حالات جديدة مسجلة: ${file.newCaseEvents.length} (آخرها ${formatDateAr([...file.newCaseEvents].sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0].date)})</div>` : ''}
+          <div class="psub" style="margin-top:4px;">${patient.phone ? `<a class="wa-btn small" data-wa-link href="${buildWhatsappLinkWithText(patient.phone, buildPatientGreetingMessage(patient))}" target="_blank" rel="noopener">💬 ${escapeHtml(patient.phone)}</a>` : 'مفيش رقم موبايل'}</div>
+        </div>
+        </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <button class="secondary small" id="markNewCaseBtn">🆕 حالة جديدة</button>
+          <button class="secondary small" id="patientDocsBtn">📄 مستندات</button>
+          ${isDebonded
+            ? `<button class="secondary small" id="reactivateCaseBtn">↩️ رجّع الحالة نشطة</button>`
+            : `<button class="secondary small" id="markDebondedBtn">🔓 الحالة فكت</button>`}
+          <button class="secondary small" id="editPatientBtn">✏️ تعديل بيانات المريض</button>
+        </div>
+      </div>
+    </div>
+    <div class="tabs">${tabsHtml}</div>
+    <div class="card">${bodyHtml}</div>
+  `;
+}
+
+// ---- Patient header "٣ ثواني" helpers ----
+
+// آخر زيارة حقيقية (مش يوم "مجاش") من المتابعة الشهرية
+function patientLastVisitDate(file){
+  const real = (file.monthlyLog||[]).filter(e => e.date && !e.missed);
+  if(!real.length) return null;
+  return [...real].sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0].date;
+}
+
+// مفيش تاريخ ميعاد مسجل لكل مريض لوحده في النظام حاليًا — فبنستخدم أقرب يوم شغل للعيادة نفسها
+// (نفس المصدر المستخدم في كارت العيادة بشاشة العيادات)، وده تقريبي مش ميعاد شخصي للمريض ده تحديدًا
+function patientNextClinicVisit(clinic){
+  if(!clinic) return null;
+  const upcoming = clinicUpcomingVisits(clinic);
+  return upcoming.length ? upcoming[0].date : null;
+}
+
+// تاجات سريعة تلخّص الحالة، مبنية على بيانات حقيقية موجودة فعلاً بدل تصنيف مخترع: حقل الخلع/بدون
+// خلع من خطة العلاج + أول كام بند في Problem List and Mechanics (نفس القسم المستخدم في 🚩).
+// لو عايز تصنيف منظم زي "Class II" لازم يتضاف كحقل ثابت في شيت التشخيص الأول — دلوقتي الشيت نص
+// حر بالكامل فمفيش مكان موثوق نجيب منه "Class II" أو "Crowding" تحديدًا.
+function patientHeaderTags(file){
+  const tags = [];
+  const txPlan = findDiagSection(file, 'Treatment Plan');
+  const extraction = findDiagField(txPlan, 'Extraction / Non-extraction');
+  if(extraction) tags.push(extraction);
+  const problemSection = (file.diagnosisSections||[]).find(s => s.title.trim().toLowerCase() === 'problem list and mechanics');
+  (problemSection ? problemSection.fields||[] : []).forEach(f=>{
+    if(f.label && tags.length < 4) tags.push(f.label.split(':')[0].trim());
+  });
+  return tags.slice(0, 4);
+}
+
+function findDiagSection(file, title){
+  return (file.diagnosisSections||[]).find(s=>s.title===title);
+}
+function findDiagField(section, label){
+  if(!section) return '';
+  const f = (section.fields||[]).find(x=>x.label===label);
+  return f ? (f.value||'') : '';
+}
+
+function renderOverviewTab(){
+  const file = state.currentPatientFile;
+
+  const chiefText = file.chiefComplaint || '';
+
+  const txPlan = findDiagSection(file, 'Treatment Plan');
+  const extraction = findDiagField(txPlan, 'Extraction / Non-extraction');
+  const upperPlan = findDiagField(txPlan, 'Upper plan');
+  const lowerPlan = findDiagField(txPlan, 'Lower plan');
+
+  const spaceAnchor = findDiagSection(file, 'Space Management / Anchorage');
+  const anchorage = findDiagField(spaceAnchor, 'Anchorage');
+
+  const log = file.monthlyLog || [];
+  const sortedLog = [...log].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const lastEntry = sortedLog[0] || null;
+  const lastDoneText = lastEntry
+    ? [lastEntry.doneUpper, lastEntry.doneLower, lastEntry.doneBoth !== undefined ? lastEntry.doneBoth : lastEntry.done].filter(Boolean).join(' | ')
+    : '';
+  const lastHygieneEntry = sortedLog.find(e=>e.hygieneRating);
+  const lastPlanText = lastEntry
+    ? [lastEntry.planUpper, lastEntry.planLower, lastEntry.planBoth !== undefined ? lastEntry.planBoth : lastEntry.plan].filter(Boolean).join(' | ')
+    : '';
+  // "اللي اتعمل" بيتاخد من آخر شهر اتسجل فعليًا، و"الشهر الجاي" هو الشهر اللي بعده مباشرة —
+  // بيتحدث لوحده تلقائي كل ما يتسجل شهر جديد، من غير ما حد يلمس التاريخ يدوي
+  const doneMonthLabel = lastEntry ? monthLabelAr((lastEntry.date||'').slice(0,7)) : '';
+  const nextMonthLabel = lastEntry ? monthLabelAr(addMonthToYm((lastEntry.date||'').slice(0,7), 1)) : '';
+
+  const bm = ensureBracketMap(file);
+  const allNums = [...FDI_TEETH_ROWS.upper, ...FDI_TEETH_ROWS.lower];
+  const brokenNow = allNums.filter(n=>bm.teeth[n].status==='broken').length;
+
+  // P0-5: بالقروش (integer) — نفس مصدر finance-tab.js
+  const { caseValueCents, remainingCents, paidCents: paidSumCents } = computePatientFinance(file);
+
+  const stageCounts = computeStageCounts(file);
+  let lastStageLabel = '', lastStageDate = '';
+  allTreatmentStages().forEach(st=>{
+    (stageCounts[st.id]||[]).forEach(e=>{
+      if(!lastStageDate || (e.date||'') > lastStageDate){ lastStageDate = e.date||''; lastStageLabel = st.label; }
+    });
+  });
+
+  // سجل الحضور — تواريخ بس: جه (من غير تفاصيل اللي اتعمل)، أو مجاش + السبب. القايمة نفسها مقفولة
+  // ورا زرار عشان الصفحة متطولش، والعدادين (جه / مجاش) فوقها ظاهرين طول الوقت.
+  const dateLoggedEntries = (file.monthlyLog||[]).filter(e=>e.date).sort((a,b)=>a.date.localeCompare(b.date));
+  const attendanceRows = dateLoggedEntries.map(e => ({ date: e.date, missed: !!e.missed, reason: e.missedReason })).reverse(); // أحدث حاجة فوق
+  const cameCount = dateLoggedEntries.filter(e=>!e.missed).length;
+  const missedCount = dateLoggedEntries.filter(e=>e.missed).length;
+  const attendanceOpen = !!state.attendanceLogOpen;
+
+  return `
+    ${patientAttentionHtml(file)}
+    <div class="patient-notes-banner">
+      <div class="patient-notes-header">📌 ملاحظات${(file.notes||[]).length ? ` <span style="font-size:12px;font-weight:400;color:var(--muted);">— ${notesProgress(file.notes).done} من ${notesProgress(file.notes).total} اتعملوا</span>` : ''}</div>
+      <div class="patient-notes-list">
+        ${(file.notes||[]).length ? sortPatientNotes(file.notes).map(n=>`
+          <div class="patient-note-item" style="display:flex;gap:10px;align-items:flex-start;${n.done ? 'opacity:.6;' : ''}">
+            <input type="checkbox" class="patient-note-check" data-note-id="${escapeHtml(String(n.id))}" ${n.done ? 'checked' : ''} title="${n.done ? 'شيل علامة التمام' : 'علّم إنها اتعملت'}" style="margin-top:4px;flex:0 0 auto;width:18px;height:18px;cursor:pointer;">
+            <div style="flex:1;min-width:0;">
+              <div class="patient-note-text" style="${n.done ? 'text-decoration:line-through;' : ''}">${escapeHtml(n.text)}</div>
+              <div class="patient-note-meta">
+                <span>${n.done && n.doneAt ? '✅ اتعملت ' + escapeHtml(formatDateAr(n.doneAt)) + ' — اتكتبت ' + escapeHtml(formatDateAr(n.date)) : escapeHtml(formatDateAr(n.date))}</span>
+                <button type="button" class="patient-note-remove" data-note-id="${escapeHtml(String(n.id))}" title="حذف الملاحظة">×</button>
+              </div>
+            </div>
+          </div>
+        `).join('') : `<div class="placeholder" style="padding:4px 0;">لسه مفيش ملاحظات</div>`}
+      </div>
+      <div class="row" style="gap:8px;margin-top:8px;">
+        <input type="text" id="newPatientNoteInput" placeholder="اكتب ملاحظة جديدة...">
+        <button type="button" id="addPatientNoteBtn" class="secondary small">+ إضافة</button>
+      </div>
+    </div>
+    <div class="overview-grid">
+      ${(file.caseStatus || 'active') === 'debonded' ? renderRetentionCardHtml(file) : ''}
+      ${renderLatestDuringPhotosCardHtml(file)}
+      <div class="overview-card" data-goto-tab="diagnosis" title="افتح التشخيص والخطة">
+        <div class="overview-card-title">خطة العلاج</div>
+        ${chiefText ? `<div class="overview-row"><span class="ov-lbl">Chief Complaint</span><span class="ov-val">${escapeHtml(chiefText)}</span></div>` : ''}
+        <div class="overview-row"><span class="ov-lbl">خلع / بدون خلع</span><span class="ov-val">${extraction ? escapeHtml(extraction) : '—'}</span></div>
+        <div class="overview-row"><span class="ov-lbl">Upper plan</span><span class="ov-val">${upperPlan ? escapeHtml(upperPlan) : '—'}</span></div>
+        <div class="overview-row"><span class="ov-lbl">Lower plan</span><span class="ov-val">${lowerPlan ? escapeHtml(lowerPlan) : '—'}</span></div>
+        <div class="overview-row"><span class="ov-lbl">Anchorage</span><span class="ov-val">${anchorage ? escapeHtml(anchorage) : '—'}</span></div>
+      </div>
+
+      <div class="overview-card" data-goto-tab="monthly" title="افتح المتابعة الشهرية">
+        <div class="overview-card-title">اللي اتعمل${doneMonthLabel ? ' — ' + escapeHtml(doneMonthLabel) : ''}</div>
+        ${lastEntry ? `
+          <div class="overview-row"><span class="ov-lbl">التاريخ</span><span class="ov-val">${escapeHtml(lastEntry.date||'')}</span></div>
+          ${lastEntry.missed
+            ? `<div class="overview-row"><span class="ov-lbl">اللي اتعمل</span><span class="ov-val" style="color:var(--red);">❌ مجاش${lastEntry.missedReason ? ' (' + escapeHtml(lastEntry.missedReason) + ')' : ''}</span></div>`
+            : `<div class="overview-row"><span class="ov-lbl">اللي اتعمل</span><span class="ov-val">${escapeHtml(lastDoneText || '—')}</span></div>`}
+        ` : `<div class="placeholder">لسه مفيش متابعة مسجلة</div>`}
+        ${lastHygieneEntry ? `<div class="overview-row" data-goto-tab="hygiene" title="افتح نظافة الأسنان"><span class="ov-lbl">آخر تقييم نظافة</span><span class="ov-val"><span class="hygiene-chip ${HYGIENE_CLASS[lastHygieneEntry.hygieneRating]}">${HYGIENE_LABELS[lastHygieneEntry.hygieneRating]}</span></span></div>` : ''}
+      </div>
+
+      <div class="overview-card" data-goto-tab="monthly" title="افتح المتابعة الشهرية">
+        <div class="overview-card-title">الشهر الجاي${nextMonthLabel ? ' — ' + escapeHtml(nextMonthLabel) : ''}</div>
+        ${lastPlanText ? `
+          <div class="overview-row"><span class="ov-lbl">الخطة</span><span class="ov-val">${escapeHtml(lastPlanText)}</span></div>
+        ` : `<div class="placeholder">لسه مفيش خطة مسجلة</div>`}
+      </div>
+
+      <div class="overview-card ov-red" data-goto-tab="monthly" title="افتح المتابعة الشهرية والفصوص">
+        <div class="overview-card-title">خريطة الفصوص</div>
+        <div class="overview-row"><span class="ov-lbl">مكسور حاليًا</span><span class="ov-val ${brokenNow>0?'ov-alert':''}">${brokenNow}</span></div>
+      </div>
+
+      <div class="overview-card ov-red" data-goto-tab="finance" title="افتح الحسابات">
+        <div class="overview-card-title">الحسابات</div>
+        <div class="overview-row"><span class="ov-lbl">الإجمالي</span><span class="ov-val">${(typeof financeFmt === 'function' ? financeFmt : formatEgpFromCents)(caseValueCents)} جنيه</span></div>
+        <div class="overview-row"><span class="ov-lbl">المحصّل</span><span class="ov-val">${(typeof financeFmt === 'function' ? financeFmt : formatEgpFromCents)(paidSumCents)} جنيه</span></div>
+        <div class="overview-row"><span class="ov-lbl">الباقي</span><span class="ov-val ${remainingCents>0?'ov-alert':''}">${(typeof financeFmt === 'function' ? financeFmt : formatEgpFromCents)(remainingCents)} جنيه</span></div>
+        ${computeUnpaidMonths(file) >= UNPAID_MONTHS_ALERT_THRESHOLD ? `<div class="overview-row"><span class="ov-lbl">💰 مدفعش</span><span class="ov-val ov-alert stock-alert-blink">من ${computeUnpaidMonths(file)} شهر</span></div>` : ''}
+        ${file.accountSettled ? `<div class="overview-row"><span class="ov-lbl">حالة الحساب</span><span class="ov-val" style="color:var(--green);">✅ خلص</span></div>` : ''}
+      </div>
+
+      <div class="overview-card" data-goto-tab="stages" title="افتح مراحل العلاج">
+        <div class="overview-card-title">مراحل العلاج</div>
+        ${lastStageLabel ? `<div class="overview-row"><span class="ov-lbl">آخر مرحلة</span><span class="ov-val">${escapeHtml(lastStageLabel)} (${escapeHtml(lastStageDate)})</span></div>` : `<div class="placeholder">لسه مفيش مرحلة متسجلة</div>`}
+      </div>
+
+      <div class="overview-card" data-goto-tab="monthly" title="افتح المتابعة الشهرية">
+        <div class="overview-card-title">سجل الحضور</div>
+        <div class="overview-row"><span class="ov-lbl">جه</span><span class="ov-val">${cameCount} مرة</span></div>
+        <div class="overview-row"><span class="ov-lbl">مجاش</span><span class="ov-val ${missedCount?'ov-alert':''}">${missedCount} مرة</span></div>
+        ${attendanceRows.length ? `
+          <button type="button" class="secondary small" id="toggleAttendanceLogBtn" style="margin-top:8px;">${attendanceOpen ? '▾ إخفاء' : '▸ عرض'} سجل الحضور (${attendanceRows.length})</button>
+          ${attendanceOpen ? `
+            <div style="margin-top:8px;max-height:220px;overflow-y:auto;">
+              ${attendanceRows.map(r => `
+                <div style="font-size:12px;line-height:1.7;padding:4px 0;border-bottom:1px solid var(--border);">
+                  ${r.missed
+                    ? `<b>${escapeHtml(formatDateAr(r.date))}</b> — <span style="color:var(--red);">❌ مجاش${r.reason ? ' (' + escapeHtml(r.reason) + ')' : ''}</span>`
+                    : `<b>${escapeHtml(formatDateAr(r.date))}</b> — جه`}
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+        ` : `<div class="placeholder">لسه مفيش متابعة مسجلة</div>`}
+      </div>
+    </div>
+  `;
+}
+
+// ---- ملاحظات المريض: علامة "اتعملت" + تاريخ الإنجاز ----
+// note = {id, text, date, done?, doneAt?} — done/doneAt اختياريين (الملاحظات القديمة من غيرهم = لسه ما اتعملتش).
+// اللي لسه ما اتعملتش فوق (الأحدث كتابة الأول)، واللي اتعمل تحت (الأحدث إنجاز الأول).
+function sortPatientNotes(notes){
+  const list = Array.isArray(notes) ? notes.filter(n => n && typeof n === 'object') : [];
+  const pending = list.filter(n => !n.done).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const done = list.filter(n => n.done).sort((a,b)=>String(b.doneAt||'').localeCompare(String(a.doneAt||'')));
+  return pending.concat(done);
+}
+function notesProgress(notes){
+  const list = Array.isArray(notes) ? notes.filter(n => n && typeof n === 'object') : [];
+  return { total: list.length, done: list.filter(n => n.done).length };
+}
+
+async function togglePatientNoteDone(noteId, checked){
+  const file = state.currentPatientFile;
+  const n = file && (file.notes||[]).find(x=>String(x.id)===String(noteId));
+  if(!n) return;
+  if(checked){ n.done = true; n.doneAt = todayStr(); }
+  else { delete n.done; delete n.doneAt; }
+  const ok = await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  if(ok === true && typeof logActivity === 'function'){
+    await logActivity('patient_note_done', `${checked ? 'علّم ملاحظة "اتعملت"' : 'شال علامة "اتعملت" من ملاحظة'}: ${String(n.text||'').slice(0,60)} — مريض ${patientNameForLog()}`);
+  }
+  render();
+}
+
+async function addPatientNote(){
+  const input = document.getElementById('newPatientNoteInput');
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text) return;
+  const file = state.currentPatientFile;
+  if(!file.notes) file.notes = [];
+  file.notes.push({ id: uid(), text, date: todayStr() });
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  render();
+}
+
+async function removePatientNote(noteId){
+  if(!(await confirmModal('حذف الملاحظة دي؟'))) return;
+  const file = state.currentPatientFile;
+  file.notes = (file.notes||[]).filter(n=>String(n.id)!==String(noteId));
+  await savePatientFile(state.currentPatientId, stripHelperFields(file));
+  render();
+}
+
+function bracketSystemLabel(v){
+  if(v === 'roth') return 'ROTH';
+  if(v === 'mbt') return 'MBT';
+  return 'غير محدد ⚠';
+}
+
+function attachPatientHandlers(){
+  document.getElementById('crumbClinics2').onclick = () => { state.view = 'clinics'; render(); };
+  document.getElementById('crumbPatients').onclick = async () => {
+    state.view = 'patients';
+    state.clinicSummaryLoading = true;
+    render();
+    await loadClinicPatientAggregates(state.currentClinicId, state.clinicSummaryMonth || currentMonthStr());
+    render();
+  };
+  document.querySelectorAll('.tab').forEach(el=>{
+    el.onclick = () => { state.activeTab = el.dataset.tab; render(); };
+  });
+  // كروت نظرة عامة: الضغط على أي كارت (أو صف جواه) بيفتح التبويب المرتبط بيه. الأزرار واللينكات جوه
+  // الكارت (إخفاء/عرض سجل الحضور، صور، واتساب...) بتشتغل زي ما هي من غير ما تنقلك.
+  document.querySelectorAll('[data-goto-tab]').forEach(el=>{
+    el.onclick = (ev) => {
+      if(ev.target.closest('button, a, input, select, textarea, img, label')) return;
+      if(ev.target.closest('[data-goto-tab]') !== el) return; // الصف الأقرب هو اللي يتصرف (نظافة جوه "اللي اتعمل")
+      state.activeTab = el.dataset.gotoTab;
+      render();
+      window.scrollTo({ top: 0 });
+    };
+  });
+  const editBtn = document.getElementById('editPatientBtn');
+  if(editBtn) editBtn.onclick = () => openEditPatientModal();
+  const newCaseBtn = document.getElementById('markNewCaseBtn');
+  if(newCaseBtn) newCaseBtn.onclick = () => markNewCaseManually();
+  const docsBtn = document.getElementById('patientDocsBtn');
+  if(docsBtn) docsBtn.onclick = () => openPatientDocsMenu(); // patient-docs.js
+  const debondBtn = document.getElementById('markDebondedBtn');
+  if(debondBtn) debondBtn.onclick = () => markCaseDebonded();
+  const reactivateBtn = document.getElementById('reactivateCaseBtn');
+  if(reactivateBtn) reactivateBtn.onclick = () => reactivateCase();
+  attachLatestDuringPhotosHandlers();
+  attachRetentionHandlers(); // كارت التثبيت (retention.js) — بيظهر في نظرة عامة للحالات اللي فكت بس
+  const attendanceBtn = document.getElementById('toggleAttendanceLogBtn');
+  if(attendanceBtn) attendanceBtn.onclick = () => { state.attendanceLogOpen = !state.attendanceLogOpen; render(); };
+  const addNoteBtn = document.getElementById('addPatientNoteBtn');
+  if(addNoteBtn) addNoteBtn.onclick = () => addPatientNote();
+  const noteInput = document.getElementById('newPatientNoteInput');
+  if(noteInput) noteInput.onkeydown = (e) => { if(e.key === 'Enter'){ e.preventDefault(); addPatientNote(); } };
+  document.querySelectorAll('.patient-note-check').forEach(el=>{
+    el.onchange = () => togglePatientNoteDone(el.dataset.noteId, el.checked);
+  });
+  document.querySelectorAll('.patient-note-remove').forEach(el=>{
+    el.onclick = () => removePatientNote(el.dataset.noteId);
+  });
+  if(state.activeTab === 'diagnosis') attachDiagnosisHandlers();
+  if(state.activeTab === 'monthly') attachMonthlyHandlers();
+  if(state.activeTab === 'stages') attachStagesHandlers();
+  if(state.activeTab === 'finance') attachFinanceHandlers();
+  if(state.activeTab === 'photos') attachPhotosHandlers();
+}
+
+
+
+// ============ كارت "آخر صور أثناء العلاج" في نظرة عامة ============
+// بيعرض آخر زيارة "أثناء العلاج" فيها صور (بتاريخها) من غير ما تدخل تاب الصور وتدوّر.
+// الصور بتفتح في نفس الـ lightbox بتاع تاب الصور (تكبير + سوايب بين الصور).
+function collectVisitPhotoPaths(visit){
+  const paths = [];
+  ['extraoral', 'intraoral'].forEach(cat => {
+    if(visit && visit[cat]) Object.values(visit[cat]).forEach(sl => { if(sl && sl.path) paths.push(sl.path); });
+  });
+  return paths;
+}
+
+// الزيارات متخزنة مترتبة بالتاريخ تصاعدي — بناخد آخر واحدة فيها صورة واحدة على الأقل
+function latestDuringVisitWithPhotos(file){
+  const during = (file && file.photos && file.photos.during) || [];
+  const sorted = [...during].sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  for(let i = sorted.length - 1; i >= 0; i--){
+    if(collectVisitPhotoPaths(sorted[i]).length) return sorted[i];
+  }
+  return null;
+}
+
+function renderLatestDuringPhotosCardHtml(file){
+  const visit = latestDuringVisitWithPhotos(file);
+  if(!visit){
+    return `
+      <div class="overview-card" style="grid-column:1/-1;">
+        <div class="overview-card-title">📷 آخر صور أثناء العلاج</div>
+        <div class="placeholder" style="padding:6px 0;">لسه مفيش صور أثناء العلاج</div>
+      </div>
+    `;
+  }
+  const dl = (typeof daysUntil === 'function') ? daysUntil(visit.date) : null;
+  const agoLabel = (dl !== null && dl <= 0) ? (dl === 0 ? 'النهاردة' : `من ${-dl} يوم`) : '';
+  const slots = [
+    ...PHOTO_EXTRAORAL_SLOTS.map(sl => ({ ...sl, category: 'extraoral' })),
+    ...PHOTO_INTRAORAL_SLOTS.map(sl => ({ ...sl, category: 'intraoral' }))
+  ];
+  const thumbs = slots.map(sl => {
+    const obj = visit[sl.category] ? visit[sl.category][sl.id] : null;
+    const url = obj ? resolvePhotoUrl(obj) : '';
+    if(!url) return '';
+    return `
+      <div style="text-align:center;">
+        <img src="${escapeHtml(url)}" class="ov-photo-thumb" data-ov-photo-url="${escapeHtml(url)}" loading="lazy" decoding="async"
+          style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;cursor:zoom-in;display:block;">
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">${escapeHtml(sl.label)}</div>
+      </div>`;
+  }).join('');
+  return `
+    <div class="overview-card" style="grid-column:1/-1;">
+      <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div class="overview-card-title" style="margin:0;">📷 آخر صور أثناء العلاج — ${escapeHtml(formatDateAr(visit.date))}${agoLabel ? ` <span style="color:var(--muted);font-weight:400;font-size:12px;">(${agoLabel})</span>` : ''}</div>
+        <button type="button" class="secondary small" id="ovOpenDuringPhotosBtn" data-visit-id="${escapeHtml(visit.id)}">كل الزيارات ←</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;margin-top:10px;">${thumbs}</div>
+    </div>
+  `;
+}
+
+function attachLatestDuringPhotosHandlers(){
+  const thumbs = Array.from(document.querySelectorAll('.ov-photo-thumb'));
+  if(thumbs.length){
+    const urls = thumbs.map(t => t.dataset.ovPhotoUrl);
+    thumbs.forEach((el, i) => { el.onclick = () => openLightbox(urls, i); });
+  }
+  const btn = document.getElementById('ovOpenDuringPhotosBtn');
+  if(btn) btn.onclick = () => {
+    if(!state.photosActiveSectionByPatient) state.photosActiveSectionByPatient = {};
+    state.photosActiveSectionByPatient[state.currentPatientId] = 'during';
+    state.photosActiveVisitId = btn.dataset.visitId;
+    state.activeTab = 'photos';
+    render();
+  };
+}
