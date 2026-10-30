@@ -473,22 +473,7 @@
     .modal{max-width:none !important;width:100% !important;border-radius:18px 18px 0 0;max-height:88vh;overflow-y:auto;padding-bottom:calc(20px + env(safe-area-inset-bottom,0px));}
     .modal-actions{position:sticky;bottom:-20px;background:var(--panel);padding:12px 0 4px;margin-top:10px;}
   }
-
-/* Orenda follow-up refinements */
-.treatment-stage-groups{display:flex;flex-direction:column;gap:8px;}
-.treatment-stage-group{border:1px solid var(--border);border-radius:11px;background:var(--panel);overflow:hidden;}
-.treatment-stage-group>summary{cursor:pointer;list-style:none;padding:11px 14px;font-weight:700;display:flex;align-items:center;justify-content:space-between;}
-.treatment-stage-group>summary::-webkit-details-marker{display:none;}
-.treatment-stage-group>summary:after{content:'＋';color:var(--muted);font-size:13px;}
-.treatment-stage-group[open]>summary:after{content:'−';}
-.treatment-stage-options{display:flex;flex-wrap:wrap;gap:7px;padding:0 12px 12px;}
-.treatment-stage-subtitle{width:100%;font-size:12px;font-weight:700;color:var(--muted);padding-top:4px;}
-.followup-tube-chart{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:16px 0;}
-.followup-tube-tooth{min-height:54px;font-weight:800;font-size:17px;}
-.followup-tube-tooth.active{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important;}
-
 </style>
-<link rel="stylesheet" href="design-system.css?v=1">
 </head>
 <body>
 <div class="app" id="app">
